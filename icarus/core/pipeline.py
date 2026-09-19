@@ -29,6 +29,10 @@ class CheckpointFingerprintMismatch(ValueError):
     """
 
 
+class CheckpointProvenanceError(ValueError):
+    """Raised when a resumable checkpoint cannot prove its run identity."""
+
+
 class OutputExistsError(ValueError):
     """Raised when an output database already exists and cannot be safely reused.
 
@@ -233,27 +237,134 @@ class Pipeline:
         if not self.checkpoint_db.exists():
             return False
         self._validate_fingerprint()  # raises on mismatch
+        self._restore_version_identity()
         return True
+
+    @staticmethod
+    def _ensure_checkpoint_schema(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                phase_index INTEGER PRIMARY KEY,
+                phase_name TEXT,
+                status TEXT,
+                timestamp REAL,
+                stats TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS checkpoint_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+
+    def _persist_version_identity(self) -> None:
+        """Bind this checkpoint to the one versions row it may resume."""
+        if self.context.version_id is None:
+            raise CheckpointProvenanceError(
+                "Cannot create a resumable checkpoint without an active versions row"
+            )
+        conn = sqlite3.connect(str(self.checkpoint_db))
+        try:
+            self._ensure_checkpoint_schema(conn)
+            metadata = {
+                "run_id": self.context.run_id,
+                "version_id": str(self.context.version_id),
+            }
+            if self.fingerprint is not None:
+                metadata["fingerprint"] = _canonical_fingerprint(self.fingerprint)
+            conn.executemany(
+                "INSERT OR REPLACE INTO checkpoint_meta (key, value) VALUES (?, ?)",
+                metadata.items(),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _restore_version_identity(self) -> None:
+        """Restore and validate the original run identity before resume."""
+        if not self.checkpoint_db.exists():
+            return
+        conn = sqlite3.connect(str(self.checkpoint_db))
+        try:
+            rows = conn.execute(
+                "SELECT key, value FROM checkpoint_meta "
+                "WHERE key IN ('run_id', 'version_id')"
+            ).fetchall()
+        except sqlite3.OperationalError as error:
+            raise CheckpointProvenanceError(
+                f"Checkpoint {self.checkpoint_db.name} has no usable provenance "
+                "metadata and cannot be resumed; pass --fresh for a clean rebuild"
+            ) from error
+        finally:
+            conn.close()
+
+        metadata = dict(rows)
+        missing = {"run_id", "version_id"} - metadata.keys()
+        if missing:
+            raise CheckpointProvenanceError(
+                f"Checkpoint {self.checkpoint_db.name} is missing provenance "
+                f"metadata ({', '.join(sorted(missing))}) and cannot be resumed; "
+                "pass --fresh for a clean rebuild"
+            )
+        try:
+            version_id = int(metadata["version_id"])
+        except (TypeError, ValueError) as error:
+            raise CheckpointProvenanceError(
+                f"Checkpoint {self.checkpoint_db.name} has an invalid version_id "
+                f"{metadata['version_id']!r}; pass --fresh for a clean rebuild"
+            ) from error
+
+        if not self.output.exists():
+            raise CheckpointProvenanceError(
+                f"Checkpoint {self.checkpoint_db.name} references version "
+                f"{version_id}, but output database {self.output} is missing; "
+                "pass --fresh for a clean rebuild"
+            )
+        conn = open_db(self.output, readonly=True)
+        try:
+            row = conn.execute(
+                "SELECT run_id, parser_name, source_path FROM versions WHERE id = ?",
+                (version_id,),
+            ).fetchone()
+        except sqlite3.OperationalError as error:
+            raise CheckpointProvenanceError(
+                f"Checkpoint {self.checkpoint_db.name} cannot validate version "
+                f"{version_id}; pass --fresh for a clean rebuild"
+            ) from error
+        finally:
+            conn.close()
+
+        if row is None:
+            raise CheckpointProvenanceError(
+                f"Checkpoint {self.checkpoint_db.name} references missing versions "
+                f"row {version_id}; pass --fresh for a clean rebuild"
+            )
+        run_id, parser_name, source_path = row
+        expected_source = str(self.source.resolve())
+        actual_source = str(Path(source_path).resolve()) if source_path else None
+        mismatches = []
+        if run_id != metadata["run_id"]:
+            mismatches.append("run_id")
+        if parser_name != self.parser_name:
+            mismatches.append("parser_name")
+        if actual_source != expected_source:
+            mismatches.append("source_path")
+        if mismatches:
+            raise CheckpointProvenanceError(
+                f"Checkpoint {self.checkpoint_db.name} version identity mismatches "
+                f"the output/current build ({', '.join(mismatches)}); pass --fresh "
+                "for a clean rebuild"
+            )
+
+        self.context.run_id = metadata["run_id"]
+        self.context.version_id = version_id
 
     def save_checkpoint(self, phase_index: int, status: str, stats: Optional[dict] = None) -> None:
         """Persist phase completion status for resume-on-crash."""
         conn = sqlite3.connect(str(self.checkpoint_db))
         try:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS checkpoints (
-                    phase_index INTEGER PRIMARY KEY,
-                    phase_name TEXT,
-                    status TEXT,
-                    timestamp REAL,
-                    stats TEXT
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS checkpoint_meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )
-            """)
+            self._ensure_checkpoint_schema(conn)
             # Stamp the fingerprint once, on the first checkpoint write, so every
             # checkpoint this build produces carries the identity of what it was
             # built from. INSERT OR IGNORE keeps it immutable for the run.
@@ -302,7 +413,7 @@ class Pipeline:
             """, (
                 self.context.run_id,
                 self.parser_name,
-                str(self.source),
+                str(self.source.resolve()),
                 datetime.now(timezone.utc).isoformat(),
             ))
             row = conn.execute(
@@ -311,8 +422,6 @@ class Pipeline:
             if row:
                 self.context.version_id = row[0]
             conn.commit()
-        except sqlite3.OperationalError:
-            pass
         finally:
             conn.close()
 
@@ -322,18 +431,24 @@ class Pipeline:
             return
         conn = open_db(self.output)
         try:
-            ingest_stats = self.context.stats.get("ingest", {})
             entity_count = sum(
-                v for v in ingest_stats.values() if isinstance(v, int)
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE source_version_id = ?",  # nosec B608 - table comes from fixed schema-owned tuple
+                    (self.context.version_id,),
+                ).fetchone()[0]
+                for table in PROVENANCE_ENTITY_TABLES
             )
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE versions SET entity_count = ?, completed_at = ? WHERE id = ?",
                 (entity_count, datetime.now(timezone.utc).isoformat(),
                  self.context.version_id),
             )
+            if cursor.rowcount != 1:
+                raise CheckpointProvenanceError(
+                    f"Active versions row {self.context.version_id} disappeared "
+                    "before finalization"
+                )
             conn.commit()
-        except sqlite3.OperationalError:
-            pass
         finally:
             conn.close()
 
@@ -344,19 +459,29 @@ class Pipeline:
             resume: If True, skip completed phases (default behavior).
             start_phase: Force start from this phase index (overrides resume).
         """
-        last_complete = self.get_last_checkpoint() if resume else -1
+        restored_identity = resume and self.checkpoint_db.exists()
+        if restored_identity:
+            self._validate_fingerprint()
+            self._restore_version_identity()
+            last_complete = self.get_last_checkpoint()
+        else:
+            if not resume:
+                self._clear_checkpoint()
+            last_complete = -1
         start = start_phase if start_phase is not None else (last_complete + 1)
 
-        self._create_version_record()
+        if self.context.version_id is None:
+            self._create_version_record()
+        if not restored_identity:
+            self._persist_version_identity()
 
         print(f"[ICARUS] Pipeline: {len(self.phases)} phases, "
               f"source={self.source}, output={self.output}")
 
         if start >= len(self.phases):
             print(f"[ICARUS] All {len(self.phases)} phases already complete.")
-            return self.context
 
-        if start > 0:
+        elif start > 0:
             print(f"[ICARUS] Resuming from phase {start} "
                   f"({self.phases[start].name})")
 

@@ -15,15 +15,21 @@ These tests pin the three D2 behaviors:
 """
 
 import argparse
+import sqlite3
 
 import pytest
 
 from icarus.core.pipeline import (
+    PROVENANCE_ENTITY_TABLES,
     CheckpointFingerprintMismatch,
+    CheckpointProvenanceError,
     OutputExistsError,
     Pipeline,
+    _run_parser_phase_with_provenance,
     compute_fingerprint,
+    create_default_pipeline,
 )
+from icarus.core.schema import open_db
 
 
 def _fp(**overrides):
@@ -90,6 +96,161 @@ def test_same_fingerprint_resumes_without_redoing_completed_phases(tmp_path):
     make(fail_on_b=False).run(resume=True)
     # 'a' completed before the crash and must NOT be re-run; resume restarts at 'b'.
     assert calls == ["b", "c"]
+
+
+def test_default_pipeline_resume_preserves_one_complete_version(tmp_path):
+    """#86: crash after ingest and resume under the original run identity."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "sample.exe").write_bytes(b"MZ" + b"\x00" * 256)
+    output = tmp_path / "out.db"
+
+    crashed = create_default_pipeline(
+        source, output, parser_name="windows", skip_hygeia=True
+    )
+    crashed.phases[2].handler = _raise
+    with pytest.raises(RuntimeError, match="stop"):
+        crashed.run(resume=False)
+
+    original_run_id = crashed.context.run_id
+    original_version_id = crashed.context.version_id
+    assert original_version_id is not None
+
+    resumed = create_default_pipeline(
+        source, output, parser_name="windows", skip_hygeia=True
+    )
+
+    def add_post_resume_rows():
+        conn = open_db(output)
+        try:
+            cursor = conn.execute(
+                "INSERT INTO files (path, filename, file_type) VALUES (?, ?, ?)",
+                ("post-resume.txt", "post-resume.txt", "text"),
+            )
+            entity_id = cursor.lastrowid
+            conn.execute(
+                "INSERT INTO observations "
+                "(entity_table, entity_id, observed_at, event_type) "
+                "VALUES (?, ?, ?, ?)",
+                ("files", entity_id, "2026-01-01T00:00:00Z", "resume-test"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {"post_resume": 1}
+
+    resumed.phases[2].handler = lambda ctx: _run_parser_phase_with_provenance(
+        ctx, add_post_resume_rows
+    )
+    context = resumed.run(resume=True)
+
+    conn = sqlite3.connect(str(output))
+    try:
+        versions = conn.execute(
+            "SELECT id, run_id, entity_count, completed_at FROM versions"
+        ).fetchall()
+        expected_entity_count = sum(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE source_version_id = ?",  # nosec B608
+                (original_version_id,),
+            ).fetchone()[0]
+            for table in PROVENANCE_ENTITY_TABLES
+        )
+        wrong_entities = sum(
+            conn.execute(
+                f"SELECT COUNT(*) FROM {table} "  # nosec B608
+                "WHERE source_version_id IS NULL OR source_version_id != ?",
+                (original_version_id,),
+            ).fetchone()[0]
+            for table in PROVENANCE_ENTITY_TABLES
+        )
+        observation_total, wrong_observations = conn.execute(
+            "SELECT COUNT(*), SUM(version_id IS NULL OR version_id != ?) "
+            "FROM observations",
+            (original_version_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert context.run_id == original_run_id
+    assert context.version_id == original_version_id
+    assert versions == [
+        (original_version_id, original_run_id, expected_entity_count, versions[0][3])
+    ]
+    assert versions[0][3] is not None
+    assert expected_entity_count >= 2
+    assert wrong_entities == 0
+    assert observation_total == 1
+    assert wrong_observations == 0
+
+
+def _make_crashed_pipeline(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    output = tmp_path / "out.db"
+    fingerprint = _fp(source=str(source.resolve()))
+    pipeline = Pipeline(source, output, parser_name="demo", fingerprint=fingerprint)
+    pipeline.add_phase("complete", lambda ctx: {"ok": True})
+    pipeline.add_phase("crash", _raise)
+    with pytest.raises(RuntimeError, match="stop"):
+        pipeline.run(resume=False)
+    return source, output, fingerprint, pipeline
+
+
+@pytest.mark.parametrize("missing_key", ["run_id", "version_id"])
+def test_resume_refuses_missing_checkpoint_version_metadata(tmp_path, missing_key):
+    source, output, fingerprint, crashed = _make_crashed_pipeline(tmp_path)
+    conn = sqlite3.connect(str(crashed.checkpoint_db))
+    conn.execute("DELETE FROM checkpoint_meta WHERE key = ?", (missing_key,))
+    conn.commit()
+    conn.close()
+
+    resumed = Pipeline(source, output, parser_name="demo", fingerprint=fingerprint)
+    resumed.add_phase("complete", lambda ctx: {"ok": True})
+    resumed.add_phase("crash", lambda ctx: {"ok": True})
+    with pytest.raises(CheckpointProvenanceError, match=f"missing.*{missing_key}"):
+        resumed.run(resume=True)
+
+
+def test_resume_refuses_checkpoint_referencing_missing_version(tmp_path):
+    source, output, fingerprint, crashed = _make_crashed_pipeline(tmp_path)
+    conn = sqlite3.connect(str(output))
+    conn.execute("DELETE FROM versions WHERE id = ?", (crashed.context.version_id,))
+    conn.commit()
+    conn.close()
+
+    resumed = Pipeline(source, output, parser_name="demo", fingerprint=fingerprint)
+    resumed.add_phase("complete", lambda ctx: {"ok": True})
+    resumed.add_phase("crash", lambda ctx: {"ok": True})
+    with pytest.raises(CheckpointProvenanceError, match="missing versions row"):
+        resumed.run(resume=True)
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "expected"),
+    [
+        ("run_id", "different-run", "run_id"),
+        ("parser_name", "different-parser", "parser_name"),
+        ("source_path", "different-source", "source_path"),
+    ],
+)
+def test_resume_refuses_mismatched_version_identity(
+    tmp_path, column, value, expected
+):
+    source, output, fingerprint, crashed = _make_crashed_pipeline(tmp_path)
+    conn = sqlite3.connect(str(output))
+    conn.execute(
+        f"UPDATE versions SET {column} = ? WHERE id = ?",  # nosec B608 - test parameter is fixed above
+        (value, crashed.context.version_id),
+    )
+    conn.commit()
+    conn.close()
+
+    resumed = Pipeline(source, output, parser_name="demo", fingerprint=fingerprint)
+    resumed.add_phase("complete", lambda ctx: {"ok": True})
+    resumed.add_phase("crash", lambda ctx: {"ok": True})
+    with pytest.raises(CheckpointProvenanceError, match=expected):
+        resumed.run(resume=True)
 
 
 def test_changed_source_fails_loudly(tmp_path):
