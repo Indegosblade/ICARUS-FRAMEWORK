@@ -126,6 +126,10 @@ icarus parser validate icarus/parsers/windows.yaml
 icarus parser test windows
 ```
 
+`icarus parser test` runs the parser's four production gates against a compact
+self-test corpus installed with ICARUS, so it works from a wheel in any current
+directory; a source checkout and its `tests/` tree are not required.
+
 ### Python API
 
 ```python

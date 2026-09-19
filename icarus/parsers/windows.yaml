@@ -24,6 +24,6 @@ dependencies:
 reliability: "B"
 default_confidence: 0.85
 tests:
-  fixtures_dir: "tests/fixtures/windows/"
+  fixtures_dir: "selftest/fixtures/windows/"
   min_entities: 1
-  golden_output: "tests/golden/windows.json"
+  golden_output: "selftest/golden/windows.json"

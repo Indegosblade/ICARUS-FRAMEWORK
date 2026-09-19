@@ -1,0 +1,12 @@
+{
+  "parser_id": "linux",
+  "version": "1.0.0",
+  "entity_counts": {
+    "files": 3,
+    "binaries": 1,
+    "daemons": 1,
+    "frameworks": 0
+  },
+  "has_relationships": true,
+  "zero_pii": true
+}

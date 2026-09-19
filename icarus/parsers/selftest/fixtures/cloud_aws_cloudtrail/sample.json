@@ -1,0 +1,126 @@
+{
+  "Records": [
+    {
+      "eventVersion": "1.08",
+      "userIdentity": {
+        "type": "IAMUser",
+        "principalId": "AIDAEXAMPLE1111111111",
+        "arn": "arn:aws:iam::123456789012:user/test-admin",
+        "accountId": "123456789012",
+        "userName": "test-admin"
+      },
+      "eventTime": "2026-06-01T10:00:00Z",
+      "eventSource": "ec2.amazonaws.com",
+      "eventName": "DescribeInstances",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "10.0.0.1",
+      "userAgent": "aws-cli/2.0",
+      "requestParameters": {
+        "instancesSet": {"items": [{"instanceId": "i-0123456789abcdef0"}]}
+      },
+      "responseElements": null
+    },
+    {
+      "eventVersion": "1.08",
+      "userIdentity": {
+        "type": "IAMUser",
+        "principalId": "AIDAEXAMPLE1111111111",
+        "arn": "arn:aws:iam::123456789012:user/test-admin",
+        "accountId": "123456789012",
+        "userName": "test-admin"
+      },
+      "eventTime": "2026-06-01T10:05:00Z",
+      "eventSource": "s3.amazonaws.com",
+      "eventName": "GetBucketPolicy",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "10.0.0.1",
+      "userAgent": "aws-cli/2.0",
+      "requestParameters": {
+        "bucketName": "test-data-bucket"
+      },
+      "responseElements": null
+    },
+    {
+      "eventVersion": "1.08",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "AROAEXAMPLE2222222222:session-name",
+        "arn": "arn:aws:sts::123456789012:assumed-role/test-role/session-name",
+        "accountId": "123456789012"
+      },
+      "eventTime": "2026-06-01T11:00:00Z",
+      "eventSource": "iam.amazonaws.com",
+      "eventName": "CreateUser",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "10.0.0.2",
+      "userAgent": "console.amazonaws.com",
+      "requestParameters": {
+        "userName": "new-test-user"
+      },
+      "responseElements": {
+        "user": {
+          "userName": "new-test-user",
+          "userId": "AIDAEXAMPLE3333333333",
+          "arn": "arn:aws:iam::123456789012:user/new-test-user"
+        }
+      }
+    },
+    {
+      "eventVersion": "1.08",
+      "userIdentity": {
+        "type": "Root",
+        "principalId": "123456789012",
+        "arn": "arn:aws:iam::123456789012:root",
+        "accountId": "123456789012"
+      },
+      "eventTime": "2026-06-01T12:00:00Z",
+      "eventSource": "signin.amazonaws.com",
+      "eventName": "ConsoleLogin",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "10.0.0.3",
+      "userAgent": "Mozilla/5.0",
+      "requestParameters": null,
+      "responseElements": {
+        "ConsoleLogin": "Success"
+      }
+    },
+    {
+      "eventVersion": "1.08",
+      "userIdentity": {
+        "type": "IAMUser",
+        "principalId": "AIDAEXAMPLE4444444444",
+        "arn": "arn:aws:iam::123456789012:user/test-readonly",
+        "accountId": "123456789012",
+        "userName": "test-readonly"
+      },
+      "eventTime": "2026-06-01T13:00:00Z",
+      "eventSource": "lambda.amazonaws.com",
+      "eventName": "ListFunctions",
+      "awsRegion": "us-west-2",
+      "sourceIPAddress": "10.0.0.4",
+      "userAgent": "aws-sdk-python/1.0",
+      "requestParameters": null,
+      "responseElements": null
+    },
+    {
+      "eventVersion": "1.08",
+      "userIdentity": {
+        "type": "IAMUser",
+        "principalId": "AIDAEXAMPLE4444444444",
+        "arn": "arn:aws:iam::123456789012:user/test-readonly",
+        "accountId": "123456789012",
+        "userName": "test-readonly"
+      },
+      "eventTime": "2026-06-01T13:30:00Z",
+      "eventSource": "ec2.amazonaws.com",
+      "eventName": "DescribeSecurityGroups",
+      "awsRegion": "us-west-2",
+      "sourceIPAddress": "10.0.0.4",
+      "userAgent": "aws-sdk-python/1.0",
+      "requestParameters": {},
+      "responseElements": null,
+      "errorCode": "UnauthorizedAccess",
+      "errorMessage": "User is not authorized to perform ec2:DescribeSecurityGroups"
+    }
+  ]
+}

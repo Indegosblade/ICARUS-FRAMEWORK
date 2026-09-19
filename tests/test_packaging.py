@@ -11,6 +11,7 @@ tree). These tests build the real artifacts and assert the data is present.
 import subprocess
 import sys
 import tarfile
+import venv
 import zipfile
 from pathlib import Path
 
@@ -37,6 +38,12 @@ EXPECTED_JSON = {
     "icarus/parsers/catalog/parsers-devel.json",
 }
 EXPECTED = EXPECTED_YAML | EXPECTED_JSON
+SELFTEST_ROOT = REPO_ROOT / "icarus" / "parsers" / "selftest"
+EXPECTED_SELFTEST = {
+    path.relative_to(REPO_ROOT).as_posix()
+    for path in SELFTEST_ROOT.rglob("*")
+    if path.is_file()
+}
 
 
 @pytest.fixture(scope="module")
@@ -76,7 +83,7 @@ def built_dists(tmp_path_factory):
 def test_wheel_ships_parser_runtime_data(built_dists):
     whl, _ = built_dists
     names = set(zipfile.ZipFile(whl).namelist())
-    missing = EXPECTED - names
+    missing = (EXPECTED | EXPECTED_SELFTEST) - names
     assert not missing, f"wheel is missing runtime data files: {sorted(missing)}"
 
 
@@ -85,5 +92,31 @@ def test_sdist_ships_parser_runtime_data(built_dists):
     with tarfile.open(sdist) as tf:
         # entries are prefixed with 'icarus_framework-<version>/'; strip it.
         names = {"/".join(n.split("/")[1:]) for n in tf.getnames()}
-    missing = EXPECTED - names
+    missing = (EXPECTED | EXPECTED_SELFTEST) - names
     assert not missing, f"sdist is missing runtime data files: {sorted(missing)}"
+
+
+def test_wheel_installed_parser_test_runs_outside_checkout(built_dists, tmp_path):
+    """The advertised self-test must use wheel data, not the repository tests tree."""
+    whl, _ = built_dists
+    env_dir = tmp_path / "venv"
+    venv.EnvBuilder(with_pip=True, system_site_packages=True).create(env_dir)
+    python = env_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+
+    install = subprocess.run(
+        [str(python), "-m", "pip", "install", "--no-deps", str(whl)],
+        capture_output=True,
+        text=True,
+    )
+    assert install.returncode == 0, install.stderr
+
+    outside_checkout = tmp_path / "outside-checkout"
+    outside_checkout.mkdir()
+    proc = subprocess.run(
+        [str(python), "-I", "-m", "icarus", "parser", "test", "windows"],
+        cwd=outside_checkout,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    assert proc.stdout.count("[PASS]") == 4

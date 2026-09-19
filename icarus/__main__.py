@@ -220,23 +220,18 @@ def cmd_parser(args):
             print(f"FAIL: {manifest_path}\n  {e}", file=sys.stderr)
             sys.exit(1)
     elif args.parser_command == "test":
-        from icarus.parsers import get_parser
-        from icarus.parsers.manifest import load_manifest
-        from icarus.parsers.testing import ParserTestHarness
+        from icarus.parsers import get_parser, get_registry
+        from icarus.parsers.testing import ParserTestHarness, resolve_test_resource
         parser_inst = get_parser(args.parser_name)
-        parsers_dir = Path(__file__).parent / "parsers"
-        manifest_path = parsers_dir / f"{args.parser_name}.yaml"
-        if not manifest_path.exists():
+        manifest = get_registry().get_manifest(args.parser_name)
+        if manifest is None:
             print(f"ERROR: No manifest for parser '{args.parser_name}'", file=sys.stderr)
             sys.exit(1)
-        manifest = load_manifest(manifest_path)
         fixtures_dir = manifest.tests.get("fixtures_dir") if manifest.tests else None
         if not fixtures_dir:
             print("ERROR: No fixtures_dir in manifest", file=sys.stderr)
             sys.exit(1)
-        fixtures_path = Path(fixtures_dir)
-        if not fixtures_path.is_absolute():
-            fixtures_path = Path(__file__).parent.parent / fixtures_dir
+        fixtures_path = resolve_test_resource(fixtures_dir)
         print(f"Testing parser: {args.parser_name}")
         harness = ParserTestHarness(parser_inst, manifest, fixtures_path)
         results = harness.run_all()

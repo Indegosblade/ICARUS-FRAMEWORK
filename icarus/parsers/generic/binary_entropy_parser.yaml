@@ -21,6 +21,6 @@ dependencies:
 reliability: "F"
 default_confidence: 0.10
 tests:
-  fixtures_dir: "tests/fixtures/generic_binary/"
+  fixtures_dir: "selftest/fixtures/generic_binary/"
   min_entities: 1
-  golden_output: "tests/golden/generic_binary.json"
+  golden_output: "selftest/golden/generic_binary.json"

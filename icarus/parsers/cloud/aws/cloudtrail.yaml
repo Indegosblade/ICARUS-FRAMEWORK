@@ -19,7 +19,7 @@ produces:
   entity_types: ["files", "daemons", "observations"]
   # event_type stores the raw AWS eventName. This list must cover every
   # eventName the parser can legitimately emit, including all eventNames
-  # exercised by tests/fixtures/cloud_aws_cloudtrail/ — ParserTestHarness
+  # exercised by selftest/fixtures/cloud_aws_cloudtrail/ — ParserTestHarness
   # .test_schema_conformance fails the build if an observation's event_type
   # is not a member of this set.
   event_types: ["ConsoleLogin", "CreateUser", "AssumeRole", "DescribeInstances",
@@ -30,6 +30,6 @@ dependencies:
 reliability: "A"
 default_confidence: 0.90
 tests:
-  fixtures_dir: "tests/fixtures/cloud_aws_cloudtrail/"
+  fixtures_dir: "selftest/fixtures/cloud_aws_cloudtrail/"
   min_entities: 1
-  golden_output: "tests/golden/cloud_aws_cloudtrail.json"
+  golden_output: "selftest/golden/cloud_aws_cloudtrail.json"

@@ -109,14 +109,17 @@ recursion/memory failures skip one file, and compressed tar inspection has a
 
 | Gate | What It Checks |
 |------|---------------|
-| **Golden output** | Entity counts match saved baseline (tests/golden/*.json) |
-| **Idempotency** | Second run over same data adds zero new entities |
+| **Golden output** | Entity counts match the packaged saved baseline |
+| **Idempotency** | A second entity + relationship run leaves all parser output unchanged |
 | **Schema conformance** | Parser only writes to tables declared in its manifest |
 | **Zero-PII** | HYGEIA verify_clean passes on the output database |
 
 ```bash
 icarus parser test windows
 ```
+
+The compact fixture corpus and golden files ship with ICARUS, so the command
+works from an installed wheel without access to the repository's `tests/` tree.
 
 All 8 production parsers pass all 4 gates; the 1 candidate parser is under evaluation.
 

@@ -21,6 +21,6 @@ dependencies:
 reliability: "F"
 default_confidence: 0.30
 tests:
-  fixtures_dir: "tests/fixtures/generic_xml/"
+  fixtures_dir: "selftest/fixtures/generic_xml/"
   min_entities: 1
-  golden_output: "tests/golden/generic_xml.json"
+  golden_output: "selftest/golden/generic_xml.json"

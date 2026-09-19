@@ -14,6 +14,20 @@ from icarus.parsers.base import BaseParser
 from icarus.parsers.manifest import ParserManifest
 
 
+def resolve_test_resource(reference: str) -> Path:
+    """Resolve a manifest test resource from the installed parser package.
+
+    Absolute paths remain supported for third-party/development manifests.
+    Built-in manifests use package-relative ``selftest/...`` references, so
+    ``icarus parser test`` never depends on the current working directory or
+    on a source checkout containing ``tests/``.
+    """
+    path = Path(reference)
+    if path.is_absolute():
+        return path
+    return Path(__file__).parent / path
+
+
 @dataclass
 class HarnessResult:
     test_name: str
@@ -52,7 +66,7 @@ class ParserTestHarness:
 
         golden_file = Path(golden_path)
         if not golden_file.is_absolute():
-            golden_file = Path(__file__).parent.parent.parent / golden_path
+            golden_file = resolve_test_resource(golden_path)
         if not golden_file.exists():
             return HarnessResult("golden_output", False, f"Golden file not found: {golden_file}")
 

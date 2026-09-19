@@ -1,0 +1,9 @@
+{
+  "parser_id": "generic/xml",
+  "version": "1.0.0",
+  "entity_counts": {
+    "files": 1
+  },
+  "has_relationships": false,
+  "zero_pii": true
+}

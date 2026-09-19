@@ -1,0 +1,12 @@
+{
+  "parser_id": "cloud/aws/cloudtrail",
+  "version": "1.0.0",
+  "entity_counts": {
+    "files": 1,
+    "daemons": 4
+  },
+  "content_fingerprint": "575afa51e6e733ad3275cfd86246d22e1b6b027b6592c78127e3af0cf185d812",
+  "observation_count": 6,
+  "has_relationships": false,
+  "zero_pii": true
+}
