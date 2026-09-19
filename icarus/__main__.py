@@ -100,18 +100,22 @@ def cmd_query(args):
     import sqlite3
 
     from icarus.core.query import IcarusQuery
-    from icarus.integrations.hygeia import sanitization_status
+    from icarus.integrations.hygeia import (
+        sanitization_allows_default_consumer,
+        sanitization_status,
+    )
 
-    # Refuse to consume a database whose sanitization FAILED — it holds
-    # partially-processed, unverified data and is not safe to query or share
-    # (#77). A verified or --skip-hygeia database queries normally.
+    # Refuse every unverified posture by default.  A verified database has
+    # current, structured post-gate evidence; --skip-hygeia is an explicit,
+    # documented choice.  Failed and unmarked databases require an equally
+    # explicit unsafe override.
     if (
         Path(args.database).exists()
         and not getattr(args, "allow_unverified", False)
-        and sanitization_status(args.database) == "failed"
+        and not sanitization_allows_default_consumer(sanitization_status(args.database))
     ):
         print(
-            "ERROR: this database's sanitization FAILED — it is not safe to "
+            "ERROR: this database is not sanitization-verified — it is not safe to "
             "query or share. Rebuild it (icarus build --fresh), or pass "
             "--allow-unverified to inspect it anyway.",
             file=sys.stderr,
@@ -170,6 +174,7 @@ def cmd_exec(args):
     import sqlite3
 
     from icarus.core.query import IcarusQuery
+    from icarus.integrations.hygeia import invalidate_sanitization
 
     print(
         f"NOTICE: opening {args.database!r} READ-WRITE — this will MODIFY the database.",
@@ -177,8 +182,12 @@ def cmd_exec(args):
     )
     try:
         with IcarusQuery(args.database, writable=True) as q:
+            # Start before the user statement so DDL as well as DML and trust
+            # invalidation commit or roll back together.
+            q.conn.execute("BEGIN IMMEDIATE")
             cursor = q.conn.execute(args.sql)
             affected = cursor.rowcount
+            invalidate_sanitization(q.conn)
             q.commit()
     except sqlite3.DatabaseError as e:
         print(f"ERROR: exec failed: {e}", file=sys.stderr)

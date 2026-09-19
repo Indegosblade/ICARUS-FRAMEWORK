@@ -17,6 +17,7 @@ and that a corrupt database file run through ``cmd_query`` exits non-zero with a
 clean message rather than a traceback.
 """
 
+import json
 import sqlite3
 import types
 
@@ -68,6 +69,30 @@ def _query_args(db, **over):
     for k, v in over.items():
         setattr(ns, k, v)
     return ns
+
+
+def _mark_verified(db):
+    """Seed trusted sanitizer evidence for consumer-policy tests."""
+    engine = {"engine": "test", "version": "1", "mode": "fail-closed"}
+    audit = {
+        "audit_version": 1,
+        "engine": engine,
+        "verified": True,
+        "post_gate": {"passed": True, "total_findings": 0},
+    }
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            [
+                ("hygeia_status", "verified"),
+                ("hygeia_engine", json.dumps(engine, sort_keys=True)),
+                ("hygeia_audit", json.dumps(audit, sort_keys=True)),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ── the default query connection is genuinely read-only ─────────────────────
@@ -177,7 +202,11 @@ def test_writable_pragmas_do_not_enable_mutation(tmp_path):
 
 def test_cmd_query_write_gives_clean_readonly_error(tmp_path, capsys):
     db = _make_db(tmp_path)
-    args = _query_args(db, sql="INSERT INTO files (path, filename) VALUES ('/y', 'y')")
+    args = _query_args(
+        db,
+        sql="INSERT INTO files (path, filename) VALUES ('/y', 'y')",
+        allow_unverified=True,
+    )
     with pytest.raises(SystemExit) as exc:
         cli.cmd_query(args)
     assert exc.value.code != 0
@@ -192,6 +221,7 @@ def test_cmd_query_write_gives_clean_readonly_error(tmp_path, capsys):
 
 def test_exec_can_insert(tmp_path, capsys):
     db = _make_db(tmp_path)
+    _mark_verified(db)
     before = _count(db)
     args = types.SimpleNamespace(
         database=str(db),
@@ -202,6 +232,36 @@ def test_exec_can_insert(tmp_path, capsys):
     assert "Rows affected: 1" in out.out
     assert "READ-WRITE" in out.err  # the mutating-notice
     assert _count(db) == before + 1
+    conn = sqlite3.connect(str(db))
+    try:
+        assert conn.execute(
+            "SELECT value FROM metadata WHERE key = 'hygeia_status'"
+        ).fetchone() is None
+        assert conn.execute(
+            "SELECT value FROM metadata WHERE key = 'hygeia_audit'"
+        ).fetchone() is None
+        assert conn.execute(
+            "SELECT value FROM metadata WHERE key = 'hygeia_engine'"
+        ).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_exec_failure_keeps_verified_evidence(tmp_path, capsys):
+    """The content write and trust invalidation are one transaction."""
+    from icarus.integrations.hygeia import sanitization_status
+
+    db = _make_db(tmp_path)
+    _mark_verified(db)
+    args = types.SimpleNamespace(
+        database=str(db),
+        sql="INSERT INTO files (path, filename) VALUES ('/seed', 'duplicate')",
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_exec(args)
+    assert exc.value.code == 1
+    assert "exec failed" in capsys.readouterr().err
+    assert sanitization_status(db) == "verified"
 
 
 def test_icarusquery_writable_can_insert(tmp_path):
@@ -240,7 +300,7 @@ def test_query_refuses_sanitization_failed_database(tmp_path, capsys):
         cli.cmd_query(args)
     assert exc.value.code == 3
     out = capsys.readouterr()
-    assert "FAILED" in out.err and "not safe" in out.err
+    assert "not sanitization-verified" in out.err and "not safe" in out.err
     assert "/seed" not in out.out  # the unsanitized row was never emitted
 
 
@@ -257,11 +317,27 @@ def test_allow_unverified_queries_a_failed_database(tmp_path, capsys):
 
 def test_query_allows_verified_and_skipped_databases(tmp_path, capsys):
     db = _make_db(tmp_path)
+    _mark_verified(db)
+    cli.cmd_query(_query_args(db, stats=True))
+    assert capsys.readouterr().err == ""  # verified: no gate, no noise
+
     conn = sqlite3.connect(str(db))
+    conn.execute("DELETE FROM metadata WHERE key LIKE 'hygeia_%'")
     conn.execute(
-        "INSERT OR REPLACE INTO metadata (key, value) VALUES ('hygeia_status', 'verified')"
+        "INSERT OR REPLACE INTO metadata (key, value) VALUES ('hygeia_skipped', 'true')"
     )
     conn.commit()
     conn.close()
     cli.cmd_query(_query_args(db, stats=True))
-    assert capsys.readouterr().err == ""  # verified: no gate, no noise
+    assert capsys.readouterr().err == ""  # explicit skip remains allowed
+
+
+def test_query_refuses_unknown_database_without_override(tmp_path, capsys):
+    db = _make_db(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_query(_query_args(db, sql="SELECT path FROM files"))
+    assert exc.value.code == 3
+    assert "not sanitization-verified" in capsys.readouterr().err
+
+    cli.cmd_query(_query_args(db, sql="SELECT path FROM files", allow_unverified=True))
+    assert "/seed" in capsys.readouterr().out

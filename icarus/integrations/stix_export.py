@@ -7,7 +7,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
+from icarus.core.schema import open_db
+from icarus.integrations.hygeia import (
+    sanitization_allows_default_consumer,
+    sanitization_status,
+)
+
 _ICARUS_STIX_NAMESPACE = uuid.UUID("28ad9e40-63a7-4de4-a1f0-20f7f1f3cd10")
+
+
+class SanitizationTrustError(RuntimeError):
+    """Raised when a database is not safe for default STIX export."""
+
+
+def _require_export_trust(db_path: Path, allow_unverified: bool) -> None:
+    status = sanitization_status(db_path, immutable=True)
+    if not sanitization_allows_default_consumer(status) and not allow_unverified:
+        raise SanitizationTrustError(
+            "Refusing STIX export from a database that is not sanitization-verified. "
+            "Rebuild it (icarus build --fresh), or pass allow_unverified=True to "
+            "perform an unsafe export."
+        )
 
 
 def _stix_id(prefix: str, seed: str) -> str:
@@ -227,9 +247,16 @@ def export_to_stix(
     db_path: Path,
     output_path: Path,
     include_tables: Optional[List[str]] = None,
+    *,
+    allow_unverified: bool = False,
 ) -> dict:
-    """Export ICARUS database entities to a STIX 2.1 bundle JSON file."""
-    conn = sqlite3.connect(str(db_path))
+    """Export ICARUS entities to STIX, refusing unknown/failed inputs by default.
+
+    ``allow_unverified=True`` is an explicit unsafe override for inspection or
+    recovery. Sources are always opened read-only and immutable.
+    """
+    _require_export_trust(Path(db_path), allow_unverified)
+    conn = open_db(db_path, readonly=True, immutable=True)
     conn.row_factory = sqlite3.Row
     objects = []
     objects_by_id = {}

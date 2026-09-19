@@ -36,6 +36,17 @@ except PackageNotFoundError:
 
 ENGINE_NAME = "hygeia.sqlite_sanitizer.sanitize_database_generic"
 MAX_RECORDED_FINDINGS = 100
+AUDIT_VERSION = 1
+
+# This metadata is evidence about the database contents, not durable database
+# configuration.  Any supported write must remove it in that same transaction.
+_TRUST_METADATA_KEYS = (
+    "hygeia_status",
+    "hygeia_engine",
+    "hygeia_audit",
+    "hygeia_skipped",
+    "hygeia_warning",
+)
 
 # HYGEIA's generic SQLite engine consumes regex_patterns, not context_patterns.
 # Promote HYGEIA's self-labelled password pattern and add narrowly labelled
@@ -411,8 +422,10 @@ def _scan_database(db_path: Path, registry, fingerprint_key: bytes) -> Dict[str,
 def _record_safe_audit(db_path: Path, engine: Dict[str, str], audit: Dict[str, Any]) -> None:
     """Persist only safe sanitizer evidence after the post-gate succeeds."""
     payload = {
+        "audit_version": AUDIT_VERSION,
         "engine": engine,
         "verified": True,
+        "post_gate": {"passed": True, "total_findings": 0},
         "total_findings": audit["total_findings"],
         "patterns_found": audit["patterns_found"],
         "findings": audit["findings"],
@@ -479,7 +492,28 @@ def _rebuild_fts_indexes(db_path: Path) -> None:
         conn.close()
 
 
-def sanitization_status(db_path: Path) -> str:
+def _has_valid_verified_audit(rows: Dict[str, str]) -> bool:
+    """Return whether metadata contains the versioned successful-gate evidence."""
+    try:
+        engine = json.loads(rows["hygeia_engine"])
+        audit = json.loads(rows["hygeia_audit"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        isinstance(engine, dict)
+        and all(
+            isinstance(engine.get(key), str) and engine[key]
+            for key in ("engine", "version", "mode")
+        )
+        and isinstance(audit, dict)
+        and audit.get("audit_version") == AUDIT_VERSION
+        and audit.get("engine") == engine
+        and audit.get("verified") is True
+        and audit.get("post_gate") == {"passed": True, "total_findings": 0}
+    )
+
+
+def sanitization_status(db_path: Path, *, immutable: bool = False) -> str:
     """Classify a database's sanitization posture from its metadata markers.
 
     Returns one of: ``verified`` (post-gate passed), ``skipped``
@@ -491,14 +525,17 @@ def sanitization_status(db_path: Path) -> str:
     if not path.exists():
         return "unknown"
     try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        uri = f"file:{path}?mode=ro"
+        if immutable:
+            uri += "&immutable=1"
+        conn = sqlite3.connect(uri, uri=True)
     except sqlite3.Error:
         return "unknown"
     try:
         rows = dict(
             conn.execute(
                 "SELECT key, value FROM metadata WHERE key IN "
-                "('hygeia_status', 'hygeia_skipped')"
+                "('hygeia_status', 'hygeia_skipped', 'hygeia_engine', 'hygeia_audit')"
             ).fetchall()
         )
     except sqlite3.Error:
@@ -508,20 +545,37 @@ def sanitization_status(db_path: Path) -> str:
     status = rows.get("hygeia_status", "") or ""
     if status.startswith("FAILED"):
         return "failed"
-    if status == "verified":
+    if status == "verified" and _has_valid_verified_audit(rows):
         return "verified"
     if rows.get("hygeia_skipped") == "true":
         return "skipped"
     return "unknown"
 
 
+def sanitization_allows_default_consumer(status: str) -> bool:
+    """Return whether the documented default consumer policy permits ``status``."""
+    return status in {"verified", "skipped"}
+
+
+def invalidate_sanitization(conn: sqlite3.Connection) -> None:
+    """Remove content-coupled trust evidence on an existing write transaction.
+
+    Deliberately does not commit: callers that mutate content must commit this
+    deletion together with their mutation, so a stale verified marker cannot
+    survive a successful write.
+    """
+    placeholders = ", ".join("?" for _ in _TRUST_METADATA_KEYS)
+    conn.execute(
+        f"DELETE FROM metadata WHERE key IN ({placeholders})",  # nosec B608 - placeholders are generated from a fixed tuple
+        _TRUST_METADATA_KEYS,
+    )
+
+
 def mark_sanitization_failed(db_path: Path) -> None:
     """Invalidate prior clean markers when a later mandatory gate fails."""
     conn = sqlite3.connect(str(db_path))
     try:
-        conn.execute(
-            "DELETE FROM metadata WHERE key IN ('hygeia_engine', 'hygeia_audit')"
-        )
+        invalidate_sanitization(conn)
         conn.execute(
             "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
             ("hygeia_status", "FAILED: output is not safe to share"),

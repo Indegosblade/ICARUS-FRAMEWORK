@@ -394,7 +394,20 @@ def test_sanitization_status_classifies_markers(tmp_path):
         conn.close()
         return p
 
-    assert hygeia_mod.sanitization_status(_db("v.db", hygeia_status="verified")) == "verified"
+    engine = {"engine": "test", "version": "1", "mode": "fail-closed"}
+    audit = {
+        "audit_version": hygeia_mod.AUDIT_VERSION,
+        "engine": engine,
+        "verified": True,
+        "post_gate": {"passed": True, "total_findings": 0},
+    }
+    assert hygeia_mod.sanitization_status(_db(
+        "v.db",
+        hygeia_status="verified",
+        hygeia_engine=json.dumps(engine),
+        hygeia_audit=json.dumps(audit),
+    )) == "verified"
+    assert hygeia_mod.sanitization_status(_db("forged.db", hygeia_status="verified")) == "unknown"
     assert hygeia_mod.sanitization_status(_db("s.db", hygeia_skipped="true")) == "skipped"
     failed = _db("f.db")
     hygeia_mod.mark_sanitization_failed(failed)
