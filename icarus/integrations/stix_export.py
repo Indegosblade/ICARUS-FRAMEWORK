@@ -433,7 +433,7 @@ def _diff_note(
     seed = json.dumps(
         [category, table, *seed_parts], sort_keys=True, separators=(",", ":")
     )
-    note = {
+    note: dict[str, object] = {
         "type": "note",
         "id": _stix_id("note", seed),
         "spec_version": "2.1",
