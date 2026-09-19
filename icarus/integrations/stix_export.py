@@ -156,7 +156,7 @@ def _entity_identity_attributes(entity_table: str, row: dict) -> dict:
 
 
 def _entity_ref(entity_table: str, row: dict) -> str:
-    """Return a v1 canonical STIX id shared by mappers and references."""
+    """Return the current canonical STIX id shared by mappers and references."""
     try:
         stix_type = _ENTITY_TABLE_STIX_TYPE[entity_table]
     except KeyError as exc:

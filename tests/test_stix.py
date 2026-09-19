@@ -16,7 +16,6 @@ from icarus.core.differ import DiffResult, canonical_diff_value
 from icarus.core.schema import initialize_database
 from icarus.integrations.stix_export import (
     SanitizationTrustError,
-    _entity_ref,
     _stix_timestamp,
     diff_to_stix,
     export_to_stix,
