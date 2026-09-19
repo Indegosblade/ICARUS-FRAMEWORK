@@ -18,8 +18,10 @@ they are assigned per-build and carry no cross-version meaning.
 """
 
 import enum
+import json
 import re
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -98,7 +100,22 @@ class DiffResult:
         if self.changed:
             lines.append(f"\n### Changed ({len(self.changed)})")
             for item in self.changed[:DIFF_DISPLAY_LIMIT]:
-                lines.append(f"- `{_md_sanitize(item.get(self.key_column, '?'))}`")
+                label = f"- `{_md_sanitize(item.get(self.key_column, '?'))}`"
+                details = []
+                for field_name in item.get("changed_fields", []):
+                    old_value = item.get(f"old_{field_name}")
+                    new_value = item.get(f"new_{field_name}")
+                    if isinstance(old_value, (dict, list)):
+                        old_value = json.dumps(old_value, sort_keys=True, separators=(",", ":"))
+                    if isinstance(new_value, (dict, list)):
+                        new_value = json.dumps(new_value, sort_keys=True, separators=(",", ":"))
+                    details.append(
+                        f"{field_name}: {_md_sanitize(old_value)} -> "
+                        f"{_md_sanitize(new_value)}"
+                    )
+                if details:
+                    label += f" ({'; '.join(details)})"
+                lines.append(label)
 
         if self.structural:
             lines.append(f"\n### Structural ({len(self.structural)})")
@@ -386,27 +403,36 @@ class IcarusDiffer:
         key, are excluded from the natural-key comparison and surfaced
         separately so they are neither silently dropped nor compared on a
         meaningless id.
+
+        Identity is ``(entity_table, natural_key, event_type, observed_at)``;
+        ``properties``, ``observer``, and ``confidence`` are mutable content.
+        Properties are compared as canonical JSON. Duplicate identities use
+        multiset semantics: exact content cancels one-for-one, remaining rows
+        pair in canonical order, and excess rows stay added or removed. A NULL
+        timestamp remains a literal identity component for deterministic legacy
+        database handling.
         """
         new_keyed, new_unresolved = self._resolve_observations("main")
         old_keyed, old_unresolved = self._resolve_observations("old_db")
-
-        added = [self._observation_dict(t) for t in sorted(new_keyed - old_keyed)]
-        removed = [self._observation_dict(t) for t in sorted(old_keyed - new_keyed)]
+        added, removed, changed = self._diff_resolved_observations(
+            old_keyed, new_keyed
+        )
 
         # Unresolved observations (missing subject row or unmapped table) cannot
         # be compared by natural key; report them on both sides for visibility.
         for side, unresolved in (("new", new_unresolved), ("old", old_unresolved)):
-            for t in sorted(unresolved):
-                row = self._observation_dict(t)
+            for record in sorted(unresolved, key=self._observation_record_sort_key):
+                row = dict(record["output"])
                 row["unresolved"] = side
                 (added if side == "new" else removed).append(row)
 
         return DiffResult(
             added=added,
             removed=removed,
-            changed=[],
+            changed=changed,
             table="observations",
-            key_column="entity_table",
+            key_column="entity_key",
+            category=DiffCategory.PROPERTY_CHANGE,
         )
 
     # entity_table -> the column on that table that is its stable natural key.
@@ -420,13 +446,7 @@ class IcarusDiffer:
     }
 
     def _resolve_observations(self, schema: str):
-        """Resolve one database's observations to natural-key tuples.
-
-        Returns (keyed, unresolved): ``keyed`` is a set of
-        ``(entity_table, natural_key, event_type, observed_at)`` tuples;
-        ``unresolved`` is a set of ``(entity_table, "id:<n>", event_type,
-        observed_at)`` tuples for observations that could not be resolved.
-        """
+        """Resolve observations to stable identity plus mutable content records."""
         entity_tables = {
             row[0]
             for row in self.conn.execute(
@@ -434,14 +454,15 @@ class IcarusDiffer:
             )
         }
 
-        keyed = set()
-        unresolved = set()
+        keyed = []
+        unresolved = []
         for table in entity_tables:
             if table == "binaries":
                 # A binary has no unique column of its own; use its file path,
                 # which is UNIQUE, via the mandatory file_id foreign key.
                 query = (
-                    f"SELECT ob.entity_table, f.path, ob.event_type, ob.observed_at "  # nosec B608 - identifiers are fixed literals; entity_table bound as a parameter
+                    f"SELECT ob.entity_table, f.path, ob.event_type, ob.observed_at, "  # nosec B608 - identifiers are fixed literals; entity_table bound as a parameter
+                    f"ob.properties, ob.observer, ob.confidence, ob.entity_id "
                     f"FROM {schema}.observations ob "
                     f"JOIN {schema}.binaries b ON b.id = ob.entity_id "
                     f"JOIN {schema}.files f ON f.id = b.file_id "
@@ -450,7 +471,8 @@ class IcarusDiffer:
             elif table in self._OBSERVATION_ENTITY_KEY:
                 key_col = self._OBSERVATION_ENTITY_KEY[table]
                 query = (
-                    f"SELECT ob.entity_table, e.{key_col}, ob.event_type, ob.observed_at "  # nosec B608 - table/key_col come from a fixed whitelist; entity_table bound as a parameter
+                    f"SELECT ob.entity_table, e.{key_col}, ob.event_type, ob.observed_at, "  # nosec B608 - table/key_col come from a fixed whitelist; entity_table bound as a parameter
+                    f"ob.properties, ob.observer, ob.confidence, ob.entity_id "
                     f"FROM {schema}.observations ob "
                     f"JOIN {schema}.{table} e ON e.id = ob.entity_id "
                     f"WHERE ob.entity_table = ?"
@@ -458,42 +480,166 @@ class IcarusDiffer:
             else:
                 # No known natural key: keep the raw id, marked unresolved.
                 for row in self.conn.execute(
-                    f"SELECT entity_table, entity_id, event_type, observed_at "  # nosec B608 - schema is a fixed literal
+                    f"SELECT entity_table, entity_id, event_type, observed_at, "  # nosec B608 - schema is a fixed literal
+                    f"properties, observer, confidence "
                     f"FROM {schema}.observations WHERE entity_table = ?",
                     (table,),
                 ):
-                    unresolved.add((row[0], f"id:{row[1]}", row[2], row[3]))
+                    unresolved.append(self._observation_record(
+                        row[0], f"id:{row[1]}", row[2], row[3],
+                        row[4], row[5], row[6],
+                    ))
                 continue
 
-            resolved_ids = set()
             for row in self.conn.execute(query, (table,)):
                 natural = row[1]
                 if natural is None:
-                    continue
-                keyed.add((row[0], str(natural), row[2], row[3]))
-                resolved_ids.add((row[2], row[3]))
+                    unresolved.append(self._observation_record(
+                        row[0], f"id:{row[7]}", row[2], row[3],
+                        row[4], row[5], row[6],
+                    ))
+                else:
+                    keyed.append(self._observation_record(
+                        row[0], str(natural), row[2], row[3],
+                        row[4], row[5], row[6],
+                    ))
 
             # Observations whose subject row is missing (orphaned) or whose key
             # column is NULL are surfaced as unresolved rather than dropped.
             for row in self.conn.execute(
-                f"SELECT entity_table, entity_id, event_type, observed_at "  # nosec B608 - schema is a fixed literal
+                f"SELECT entity_table, entity_id, event_type, observed_at, "  # nosec B608 - schema is a fixed literal
+                f"properties, observer, confidence "
                 f"FROM {schema}.observations ob WHERE entity_table = ? "
                 f"AND NOT EXISTS (SELECT 1 FROM {schema}.{table} e WHERE e.id = ob.entity_id)",
                 (table,),
             ):
-                unresolved.add((row[0], f"id:{row[1]}", row[2], row[3]))
+                unresolved.append(self._observation_record(
+                    row[0], f"id:{row[1]}", row[2], row[3],
+                    row[4], row[5], row[6],
+                ))
 
         return keyed, unresolved
 
     @staticmethod
-    def _observation_dict(tup) -> dict:
-        entity_table, entity_key, event_type, observed_at = tup
+    def _canonical_observation_properties(raw: Optional[str]):
+        if raw is None:
+            # SQL NULL and a JSON ``null`` payload both mean no properties.
+            return "json:null", None
+        try:
+            value = json.loads(raw)
+            canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        except (ValueError, TypeError, RecursionError):
+            return f"raw:{raw}", raw
+        return f"json:{canonical}", value
+
+    @classmethod
+    def _observation_record(
+        cls, entity_table, entity_key, event_type, observed_at,
+        properties, observer, confidence,
+    ):
+        properties_key, properties_value = cls._canonical_observation_properties(
+            properties
+        )
+        identity = (entity_table, entity_key, event_type, observed_at)
+        content_key = json.dumps(
+            [properties_key, observer, confidence],
+            separators=(",", ":"),
+        )
         return {
-            "entity_table": entity_table,
-            "entity_key": entity_key,
-            "event_type": event_type,
-            "observed_at": observed_at,
+            "identity": identity,
+            "content_key": content_key,
+            "properties_key": properties_key,
+            "output": {
+                "entity_table": entity_table,
+                "entity_key": entity_key,
+                "event_type": event_type,
+                "observed_at": observed_at,
+                "properties": properties_value,
+                "observer": observer,
+                "confidence": confidence,
+            },
         }
+
+    @staticmethod
+    def _observation_record_sort_key(record) -> str:
+        return json.dumps(
+            [record["identity"], record["content_key"]],
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def _diff_resolved_observations(cls, old_records, new_records):
+        """Multiset diff, pairing duplicate content deterministically."""
+        old_by_identity = defaultdict(list)
+        new_by_identity = defaultdict(list)
+        for record in old_records:
+            old_by_identity[record["identity"]].append(record)
+        for record in new_records:
+            new_by_identity[record["identity"]].append(record)
+
+        added = []
+        removed = []
+        changed = []
+        identities = set(old_by_identity) | set(new_by_identity)
+        for identity in sorted(
+            identities,
+            key=lambda value: json.dumps(value, separators=(",", ":")),
+        ):
+            old_by_content = defaultdict(list)
+            new_by_content = defaultdict(list)
+            for record in old_by_identity[identity]:
+                old_by_content[record["content_key"]].append(record)
+            for record in new_by_identity[identity]:
+                new_by_content[record["content_key"]].append(record)
+
+            # Equal content cancels one-for-one, retaining duplicate cardinality.
+            for content_key in set(old_by_content) & set(new_by_content):
+                matched = min(
+                    len(old_by_content[content_key]),
+                    len(new_by_content[content_key]),
+                )
+                del old_by_content[content_key][:matched]
+                del new_by_content[content_key][:matched]
+
+            old_remaining = sorted(
+                (record for records in old_by_content.values() for record in records),
+                key=cls._observation_record_sort_key,
+            )
+            new_remaining = sorted(
+                (record for records in new_by_content.values() for record in records),
+                key=cls._observation_record_sort_key,
+            )
+
+            paired = min(len(old_remaining), len(new_remaining))
+            for old, new in zip(old_remaining[:paired], new_remaining[:paired]):
+                row = {
+                    key: value for key, value in new["output"].items()
+                    if key not in {"properties", "observer", "confidence"}
+                }
+                changed_fields = []
+                for field_name in ("properties", "observer", "confidence"):
+                    old_value = old["output"][field_name]
+                    new_value = new["output"][field_name]
+                    differs = (
+                        old["properties_key"] != new["properties_key"]
+                        if field_name == "properties"
+                        else old_value != new_value
+                    )
+                    if differs:
+                        changed_fields.append(field_name)
+                        row[f"old_{field_name}"] = old_value
+                        row[f"new_{field_name}"] = new_value
+                row["changed_fields"] = changed_fields
+                changed.append(row)
+
+            added.extend(
+                dict(record["output"]) for record in new_remaining[paired:]
+            )
+            removed.extend(
+                dict(record["output"]) for record in old_remaining[paired:]
+            )
+
+        return added, removed, changed
 
     def _natural_diff(
         self,

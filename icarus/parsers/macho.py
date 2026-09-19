@@ -92,18 +92,27 @@ def _parse_codesig(sig: bytes):
 
 
 def _parse_thin(
-    f, base: int, endian: Literal["little", "big"], bits: int
+    f,
+    base: int,
+    endian: Literal["little", "big"],
+    bits: int,
+    slice_size: int,
 ) -> Optional[Dict[str, Any]]:
+    header_size = 32 if bits == 64 else 28
+    if slice_size < header_size:
+        return None
     f.seek(base)
-    hdr = f.read(32)
-    if len(hdr) < 28:
+    hdr = f.read(header_size)
+    if len(hdr) < header_size:
         return None
     cputype = _u32(hdr, 4, endian)
     cpusub = _u32(hdr, 8, endian)
     ncmds = _u32(hdr, 16, endian)
     sizeofcmds = _u32(hdr, 20, endian)
-    lc_start = base + (32 if bits == 64 else 28)
+    lc_start = base + header_size
     if sizeofcmds <= 0 or sizeofcmds > 8 * 1024 * 1024:
+        return {"arch": _arch_name(cputype, cpusub), "entitlements": None, "code_sign_flags": None}
+    if sizeofcmds > slice_size - header_size:
         return {"arch": _arch_name(cputype, cpusub), "entitlements": None, "code_sign_flags": None}
     f.seek(lc_start)
     lcs = f.read(sizeofcmds)
@@ -119,8 +128,12 @@ def _parse_thin(
         if cmd == _LC_CODE_SIGNATURE and off + 16 <= len(lcs):
             dataoff = _u32(lcs, off + 8, endian)
             datasize = _u32(lcs, off + 12, endian)
-            if 0 < datasize <= _MAX_SIG_BYTES:
-                f.seek(dataoff)
+            if (
+                0 < datasize <= _MAX_SIG_BYTES
+                and dataoff <= slice_size
+                and datasize <= slice_size - dataoff
+            ):
+                f.seek(base + dataoff)
                 ents, flags = _parse_codesig(f.read(datasize))
         if cmdsize == 0:
             break
@@ -128,7 +141,7 @@ def _parse_thin(
     return {"arch": _arch_name(cputype, cpusub), "entitlements": ents, "code_sign_flags": flags}
 
 
-def _parse_fat(f, head: bytes) -> Optional[Dict[str, Any]]:
+def _parse_fat(f, head: bytes, file_size: int) -> Optional[Dict[str, Any]]:
     f.seek(0)
     hdr = f.read(8)
     nfat = _u32(hdr, 4, "big")
@@ -144,11 +157,15 @@ def _parse_fat(f, head: bytes) -> Optional[Dict[str, Any]]:
             break
         offset = (int.from_bytes(e[8:16], "big") if wide
                   else int.from_bytes(e[8:12], "big"))
+        size = (int.from_bytes(e[16:24], "big") if wide
+                else int.from_bytes(e[12:16], "big"))
+        if size < 4 or offset > file_size or size > file_size - offset:
+            continue
         f.seek(offset)
         m = f.read(4)
         if m in _MH_MAGICS:
             endian, bits = _MH_MAGICS[m]
-            info = _parse_thin(f, offset, endian, bits)
+            info = _parse_thin(f, offset, endian, bits, size)
             if info and (best is None or info["arch"].startswith("arm64")):
                 best = info
     return best
@@ -165,11 +182,13 @@ def macho_info(path: Path) -> Optional[Dict[str, Any]]:
             head = f.read(4)
             if len(head) < 4:
                 return None
+            f.seek(0, 2)
+            file_size = f.tell()
             if head in (_FAT_MAGIC, _FAT_MAGIC_64):
-                return _parse_fat(f, head)
+                return _parse_fat(f, head, file_size)
             if head in _MH_MAGICS:
                 endian, bits = _MH_MAGICS[head]
-                return _parse_thin(f, 0, endian, bits)
+                return _parse_thin(f, 0, endian, bits, file_size)
             return None
     except (OSError, PermissionError, ValueError, IndexError):
         return None

@@ -35,7 +35,8 @@ def test_macos_detects_fixture():
 
 # ── Mach-O code-signature entitlement extraction ──
 
-def _build_signed_macho(entitlements: dict) -> bytes:
+def _build_signed_macho(entitlements: dict, *, flags: int = 0x12000,
+                        cputype: int = 0x0100000C) -> bytes:
     """A minimal arm64 Mach-O carrying an embedded-entitlements code signature.
 
     Layout: mach_header_64 (32) + LC_CODE_SIGNATURE (16) + code-signature
@@ -43,11 +44,38 @@ def _build_signed_macho(entitlements: dict) -> bytes:
     """
     xml = plistlib.dumps(entitlements)
     ent_blob = struct.pack(">II", 0xFADE7171, 8 + len(xml)) + xml
-    body = struct.pack(">II", 5, 20) + ent_blob          # index: slot 5, blob at offset 20
-    superblob = struct.pack(">III", 0xFADE0CC0, 12 + len(body), 1) + body
-    header = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 1, 16, 0, 0)
+    code_dir = struct.pack(">IIII", 0xFADE0C02, 16, 0, flags)
+    ent_offset = 28
+    code_dir_offset = ent_offset + len(ent_blob)
+    body = (struct.pack(">II", 5, ent_offset)
+            + struct.pack(">II", 0, code_dir_offset)
+            + ent_blob + code_dir)
+    superblob = struct.pack(">III", 0xFADE0CC0, 12 + len(body), 2) + body
+    header = struct.pack("<IIIIIIII", 0xFEEDFACF, cputype, 0, 2, 1, 16, 0, 0)
     lc = struct.pack("<IIII", 0x1D, 16, 48, len(superblob))  # dataoff=48 = 32+16
     return header + lc + superblob
+
+
+def _wrap_fat(slices: list[bytes], *, wide: bool = False,
+              declared_sizes: list[int] | None = None) -> bytes:
+    """Wrap thin slices in a FAT/FAT64 container with page-aligned offsets."""
+    entry_size = 32 if wide else 20
+    cursor = 0x1000
+    entries = []
+    payload = bytearray()
+    for i, thin in enumerate(slices):
+        cputype = int.from_bytes(thin[4:8], "little")
+        size = declared_sizes[i] if declared_sizes else len(thin)
+        if wide:
+            entries.append(struct.pack(">IIQQII", cputype, 0, cursor, size, 12, 0))
+        else:
+            entries.append(struct.pack(">IIIII", cputype, 0, cursor, size, 12))
+        if len(payload) < cursor - (8 + entry_size * len(slices)):
+            payload.extend(b"\0" * (cursor - (8 + entry_size * len(slices)) - len(payload)))
+        payload.extend(thin)
+        cursor += len(thin)
+    magic = 0xCAFEBABF if wide else 0xCAFEBABE
+    return struct.pack(">II", magic, len(slices)) + b"".join(entries) + payload
 
 
 def test_macho_entitlement_extraction(tmp_path):
@@ -63,6 +91,52 @@ def test_macho_entitlement_extraction(tmp_path):
     info = macho_info(b)
     assert info["arch"] == "arm64"
     assert info["entitlements"] == ents
+    assert info["code_sign_flags"] == 0x12000
+
+
+@pytest.mark.parametrize("wide", [False, True], ids=["fat", "fat64"])
+def test_fat_macho_codesign_matches_thin_slice(tmp_path, wide):
+    from icarus.parsers.macho import macho_info
+
+    thin_bytes = _build_signed_macho({"com.example.slice": True}, flags=0x20400)
+    thin = tmp_path / "thin"
+    fat = tmp_path / ("fat64" if wide else "fat")
+    thin.write_bytes(thin_bytes)
+    fat.write_bytes(_wrap_fat([thin_bytes], wide=wide))
+
+    assert macho_info(fat) == macho_info(thin) == {
+        "arch": "arm64",
+        "entitlements": {"com.example.slice": True},
+        "code_sign_flags": 0x20400,
+    }
+
+
+def test_fat_macho_codesign_cannot_escape_declared_slice(tmp_path):
+    from icarus.parsers.macho import macho_info
+
+    thin_bytes = _build_signed_macho({"com.example.neighbor": True}, flags=0x4000)
+    fat = tmp_path / "truncated-slice"
+    # The signature bytes physically follow the slice, but the FAT entry declares
+    # that this architecture ends immediately after its load command.
+    fat.write_bytes(_wrap_fat([thin_bytes], declared_sizes=[48]))
+
+    assert macho_info(fat) == {
+        "arch": "arm64",
+        "entitlements": None,
+        "code_sign_flags": None,
+    }
+
+
+def test_fat_macho_prefers_arm64_from_multiple_slices(tmp_path):
+    from icarus.parsers.macho import macho_info
+
+    x86 = _build_signed_macho({"arch": "x86"}, cputype=0x01000007)
+    arm = _build_signed_macho({"arch": "arm"})
+    fat = tmp_path / "universal"
+    fat.write_bytes(_wrap_fat([x86, arm]))
+
+    assert macho_info(fat)["arch"] == "arm64"
+    assert macho_info(fat)["entitlements"] == {"arch": "arm"}
 
 
 def test_macho_info_ignores_non_macho(tmp_path):
