@@ -527,7 +527,9 @@ class Pipeline:
         if sanitize_indices:
             from icarus.integrations.hygeia import (
                 SanitizationError,
+                _record_finalized_audit,
                 mark_sanitization_failed,
+                require_hygeia,
                 verify_clean,
             )
 
@@ -559,6 +561,10 @@ class Pipeline:
                 "passed": True,
                 "total_findings": 0,
             }
+            # A successful sanitize phase alone is deliberately not consumable:
+            # finalization above writes after it.  Only this final gate may
+            # publish the structured verified marker.
+            _record_finalized_audit(self.output, require_hygeia(), final_gate)
         self._clear_checkpoint()
 
         total = time.time() - self.context.start_time

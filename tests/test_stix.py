@@ -4,13 +4,16 @@ import json
 import re
 import sqlite3
 import tempfile
+import types
 import uuid
 from pathlib import Path
 
 import pytest
 
+from icarus import __main__ as cli
 from icarus.core.schema import initialize_database
 from icarus.integrations.stix_export import (
+    SanitizationTrustError,
     _entity_ref,
     _stix_timestamp,
     diff_to_stix,
@@ -35,9 +38,177 @@ def _build_db():
         "VALUES (?, ?, ?, ?)",
         ("test-daemon", "/Library/LaunchDaemons/test.plist", "/usr/bin/testd", "root"),
     )
+    from icarus.integrations import hygeia as hygeia_mod
+
+    engine = {
+        "engine": hygeia_mod.ENGINE_NAME,
+        "version": hygeia_mod._HYGEIA_VERSION,
+        "mode": "fail-closed",
+    }
+    audit = {
+        "audit_version": hygeia_mod.AUDIT_VERSION,
+        "engine": engine,
+        "verified": True,
+        "gate": hygeia_mod.FINAL_GATE_NAME,
+        "post_gate": {"passed": True, "total_findings": 0},
+        "checked_rows": 0,
+        "total_findings": 0,
+        "patterns_found": {},
+        "findings": [],
+        "findings_truncated": False,
+    }
+    conn.executemany(
+        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+        [
+            ("hygeia_status", "verified"),
+            ("hygeia_engine", json.dumps(engine, sort_keys=True)),
+            ("hygeia_audit", json.dumps(audit, sort_keys=True)),
+        ],
+    )
     conn.commit()
     conn.close()
     return db_path
+
+
+def _source_bytes(db):
+    return {
+        suffix: (Path(str(db) + suffix).read_bytes() if Path(str(db) + suffix).exists() else None)
+        for suffix in ("", "-wal", "-shm")
+    }
+
+
+@pytest.mark.parametrize(
+    ("state", "permitted"),
+    [("verified", True), ("skipped", True), ("failed", False), ("unknown", False)],
+)
+def test_stix_export_enforces_sanitization_trust_without_mutating_source(
+    tmp_path, state, permitted
+):
+    from icarus.integrations.hygeia import mark_sanitization_failed
+
+    db = _build_db()
+    out = tmp_path / f"{state}.json"
+    try:
+        conn = sqlite3.connect(str(db))
+        if state == "skipped":
+            conn.execute("DELETE FROM metadata WHERE key LIKE 'hygeia_%'")
+            conn.execute("INSERT INTO metadata VALUES ('hygeia_skipped', 'true')")
+        elif state == "unknown":
+            conn.execute("DELETE FROM metadata WHERE key LIKE 'hygeia_%'")
+        conn.commit()
+        conn.close()
+        if state == "failed":
+            mark_sanitization_failed(db)
+
+        before = _source_bytes(db)
+        if permitted:
+            assert export_to_stix(db, out)["type"] == "bundle"
+            assert out.exists()
+        else:
+            with pytest.raises(SanitizationTrustError, match="allow_unverified=True"):
+                export_to_stix(db, out)
+            assert not out.exists()
+        assert _source_bytes(db) == before
+    finally:
+        db.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
+
+
+def test_stix_failed_canary_requires_explicit_unsafe_override(tmp_path):
+    from icarus.integrations.hygeia import mark_sanitization_failed
+
+    db = _build_db()
+    out = tmp_path / "canary.json"
+    canary = "Bearer AAAAAAAAAAAAAAAAAAAAAAAA"
+    try:
+        conn = sqlite3.connect(str(db))
+        binary_id = conn.execute("SELECT id FROM binaries LIMIT 1").fetchone()[0]
+        conn.execute(
+            "INSERT INTO entitlements (binary_id, key, value) VALUES (?, ?, ?)",
+            (binary_id, "canary", canary),
+        )
+        conn.commit()
+        conn.close()
+        mark_sanitization_failed(db)
+
+        before = _source_bytes(db)
+        with pytest.raises(SanitizationTrustError):
+            export_to_stix(db, out, include_tables=["entitlements"])
+        assert not out.exists()
+        assert _source_bytes(db) == before
+
+        bundle = export_to_stix(
+            db, out, include_tables=["entitlements"], allow_unverified=True
+        )
+        assert canary in json.dumps(bundle)
+        assert _source_bytes(db) == before
+    finally:
+        db.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("untrusted_side", ("old", "new"))
+def test_stix_diff_requires_trusted_inputs_or_unsafe_override(tmp_path, untrusted_side):
+    from icarus.integrations.hygeia import mark_sanitization_failed
+
+    old = _build_db()
+    new = _build_db()
+    out = tmp_path / f"{untrusted_side}.json"
+    try:
+        mark_sanitization_failed(old if untrusted_side == "old" else new)
+        with pytest.raises(SanitizationTrustError, match="allow_unverified=True"):
+            diff_to_stix(old, new, out)
+        assert not out.exists()
+        assert diff_to_stix(old, new, out, allow_unverified=True)["type"] == "bundle"
+    finally:
+        old.unlink(missing_ok=True)
+        new.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
+
+
+def test_cli_stix_diff_requires_explicit_unsafe_override(tmp_path, capsys):
+    from icarus.integrations.hygeia import mark_sanitization_failed
+
+    old = _build_db()
+    new = _build_db()
+    out = tmp_path / "cli.json"
+    try:
+        mark_sanitization_failed(old)
+        args = types.SimpleNamespace(old=str(old), new=str(new), stix=str(out))
+        with pytest.raises(SystemExit) as exc:
+            cli.cmd_diff(args)
+        assert exc.value.code == 3
+        assert "allow_unverified=True" in capsys.readouterr().err
+        assert not out.exists()
+
+        args.allow_unverified = True
+        cli.cmd_diff(args)
+        assert out.exists()
+    finally:
+        old.unlink(missing_ok=True)
+        new.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
+
+
+def test_stix_export_rejects_active_wal_without_sidecar_changes(tmp_path):
+    from icarus.core.schema import open_db
+
+    db = _build_db()
+    out = tmp_path / "wal.json"
+    writer = open_db(db)
+    try:
+        writer.execute("INSERT INTO files (path, filename) VALUES ('/wal', 'wal')")
+        writer.commit()
+        assert Path(str(db) + "-wal").stat().st_size > 0
+        before = _source_bytes(db)
+        with pytest.raises(SanitizationTrustError, match="active WAL"):
+            export_to_stix(db, out)
+        assert not out.exists()
+        assert _source_bytes(db) == before
+    finally:
+        writer.close()
+        db.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
 
 
 def test_stix_export_produces_bundle():
