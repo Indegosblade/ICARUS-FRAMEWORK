@@ -253,34 +253,6 @@ def test_resume_refuses_mismatched_version_identity(
         resumed.run(resume=True)
 
 
-def test_resume_refuses_source_mutated_in_place(tmp_path):
-    source = tmp_path / "source"
-    source.mkdir()
-    sample = source / "sample.exe"
-    sample.write_bytes(b"MZ" + b"\x00" * 256)
-    output = tmp_path / "out.db"
-
-    crashed = create_default_pipeline(
-        source, output, parser_name="windows", skip_hygeia=True
-    )
-    crashed.phases[2].handler = _raise
-    with pytest.raises(RuntimeError, match="stop"):
-        crashed.run(resume=False)
-
-    sample.write_bytes(b"MZ-mutated" + b"\x00" * 512)
-    resumed = create_default_pipeline(
-        source, output, parser_name="windows", skip_hygeia=True
-    )
-    with pytest.raises(CheckpointFingerprintMismatch, match="different source"):
-        resumed.run(resume=True)
-
-    conn = sqlite3.connect(str(output))
-    try:
-        assert conn.execute("SELECT COUNT(*) FROM versions").fetchone()[0] == 1
-    finally:
-        conn.close()
-
-
 def test_changed_source_fails_loudly(tmp_path):
     """#45: a checkpoint for source A must not silently resume for source B."""
     parser = _get_windows()

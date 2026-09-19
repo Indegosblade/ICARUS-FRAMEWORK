@@ -5,7 +5,6 @@ Processes data sources through a configurable sequence of phases,
 saving progress at each checkpoint. Crash at phase N? Resume from phase N.
 """
 
-import hashlib
 import json
 import sqlite3
 import time
@@ -57,8 +56,6 @@ def compute_fingerprint(
     * ``parser_impl`` — the module-qualified parser class name (implementation
       identity, so swapping which class serves a name is detected).
     * ``parser_version`` — the parser's manifest version, or ``"unknown"``.
-    * ``source_state`` — a metadata snapshot of every source-tree entry, so a
-      normal in-place edit/addition/removal between crash and resume is refused.
     * ``config`` — the normalized effective build config (the flags that change
       the produced phases/output: ``skip_hygeia`` and ``resolve``). The output
       path and the resume policy (``--fresh``) are deliberately excluded — they
@@ -80,50 +77,7 @@ def compute_fingerprint(
         "parser_name": parser_name,
         "parser_impl": f"{cls.__module__}.{cls.__qualname__}",
         "parser_version": version,
-        "source_state": _source_state(source),
         "config": {key: config[key] for key in sorted(config)},
-    }
-
-
-def _source_state(source: Path) -> dict:
-    """Return a cheap deterministic change token for a source path.
-
-    The token covers entry names, types, sizes, and nanosecond mtimes. This
-    catches ordinary in-place edits without hashing an entire forensic image on
-    every pipeline construction. Callers must still treat a resumable source as
-    immutable: an adversary able to replace bytes while preserving both size
-    and timestamp can defeat a metadata snapshot and should use ``--fresh``.
-    """
-    source = Path(source).resolve()
-    if not source.exists():
-        return {"scheme": "tree-metadata-v1", "entries": 0, "digest": "missing"}
-
-    digest = hashlib.sha256()
-    entries = [source]
-    if source.is_dir():
-        entries.extend(sorted(source.rglob("*"), key=lambda path: path.as_posix()))
-
-    for path in entries:
-        stat = path.stat(follow_symlinks=False)
-        relative = "." if path == source else path.relative_to(source).as_posix()
-        if path.is_symlink():
-            kind = "symlink"
-            extra = str(path.readlink())
-        elif path.is_dir():
-            kind = "directory"
-            extra = ""
-        else:
-            kind = "file"
-            extra = ""
-        record = (
-            f"{relative}\0{kind}\0{stat.st_size}\0{stat.st_mtime_ns}\0{extra}\n"
-        )
-        digest.update(record.encode("utf-8", errors="surrogateescape"))
-
-    return {
-        "scheme": "tree-metadata-v1",
-        "entries": len(entries),
-        "digest": digest.hexdigest(),
     }
 
 
