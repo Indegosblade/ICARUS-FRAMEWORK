@@ -1,17 +1,21 @@
 """Tests for Phase 3.6 — STIX 2.1 export."""
 
 import json
+import random
 import re
 import sqlite3
 import tempfile
+import types
 import uuid
 from pathlib import Path
 
 import pytest
 
+from icarus import __main__ as cli
+from icarus.core.differ import DiffResult, canonical_diff_value
 from icarus.core.schema import initialize_database
 from icarus.integrations.stix_export import (
-    _entity_ref,
+    SanitizationTrustError,
     _stix_timestamp,
     diff_to_stix,
     export_to_stix,
@@ -35,9 +39,428 @@ def _build_db():
         "VALUES (?, ?, ?, ?)",
         ("test-daemon", "/Library/LaunchDaemons/test.plist", "/usr/bin/testd", "root"),
     )
+    from icarus.integrations import hygeia as hygeia_mod
+
+    engine = {
+        "engine": hygeia_mod.ENGINE_NAME,
+        "version": hygeia_mod._HYGEIA_VERSION,
+        "mode": "fail-closed",
+    }
+    audit = {
+        "audit_version": hygeia_mod.AUDIT_VERSION,
+        "engine": engine,
+        "verified": True,
+        "gate": hygeia_mod.FINAL_GATE_NAME,
+        "post_gate": {"passed": True, "total_findings": 0},
+        "checked_rows": 0,
+        "total_findings": 0,
+        "patterns_found": {},
+        "findings": [],
+        "findings_truncated": False,
+    }
+    conn.executemany(
+        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+        [
+            ("hygeia_status", "verified"),
+            ("hygeia_engine", json.dumps(engine, sort_keys=True)),
+            ("hygeia_audit", json.dumps(audit, sort_keys=True)),
+        ],
+    )
     conn.commit()
     conn.close()
     return db_path
+
+
+def _source_bytes(db):
+    return {
+        suffix: (Path(str(db) + suffix).read_bytes() if Path(str(db) + suffix).exists() else None)
+        for suffix in ("", "-wal", "-shm")
+    }
+
+
+@pytest.mark.parametrize(
+    ("state", "permitted"),
+    [("verified", True), ("skipped", True), ("failed", False), ("unknown", False)],
+)
+def test_stix_export_enforces_sanitization_trust_without_mutating_source(
+    tmp_path, state, permitted
+):
+    from icarus.integrations.hygeia import mark_sanitization_failed
+
+    db = _build_db()
+    out = tmp_path / f"{state}.json"
+    try:
+        conn = sqlite3.connect(str(db))
+        if state == "skipped":
+            conn.execute("DELETE FROM metadata WHERE key LIKE 'hygeia_%'")
+            conn.execute("INSERT INTO metadata VALUES ('hygeia_skipped', 'true')")
+        elif state == "unknown":
+            conn.execute("DELETE FROM metadata WHERE key LIKE 'hygeia_%'")
+        conn.commit()
+        conn.close()
+        if state == "failed":
+            mark_sanitization_failed(db)
+
+        before = _source_bytes(db)
+        if permitted:
+            assert export_to_stix(db, out)["type"] == "bundle"
+            assert out.exists()
+        else:
+            with pytest.raises(SanitizationTrustError, match="allow_unverified=True"):
+                export_to_stix(db, out)
+            assert not out.exists()
+        assert _source_bytes(db) == before
+    finally:
+        db.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
+
+
+def test_stix_failed_canary_requires_explicit_unsafe_override(tmp_path):
+    from icarus.integrations.hygeia import mark_sanitization_failed
+
+    db = _build_db()
+    out = tmp_path / "canary.json"
+    canary = "Bearer AAAAAAAAAAAAAAAAAAAAAAAA"
+    try:
+        conn = sqlite3.connect(str(db))
+        binary_id = conn.execute("SELECT id FROM binaries LIMIT 1").fetchone()[0]
+        conn.execute(
+            "INSERT INTO entitlements (binary_id, key, value) VALUES (?, ?, ?)",
+            (binary_id, "canary", canary),
+        )
+        conn.commit()
+        conn.close()
+        mark_sanitization_failed(db)
+
+        before = _source_bytes(db)
+        with pytest.raises(SanitizationTrustError):
+            export_to_stix(db, out, include_tables=["entitlements"])
+        assert not out.exists()
+        assert _source_bytes(db) == before
+
+        bundle = export_to_stix(
+            db, out, include_tables=["entitlements"], allow_unverified=True
+        )
+        assert canary in json.dumps(bundle)
+        assert _source_bytes(db) == before
+    finally:
+        db.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("untrusted_side", ("old", "new"))
+def test_stix_diff_requires_trusted_inputs_or_unsafe_override(tmp_path, untrusted_side):
+    from icarus.integrations.hygeia import mark_sanitization_failed
+
+    old = _build_db()
+    new = _build_db()
+    out = tmp_path / f"{untrusted_side}.json"
+    try:
+        mark_sanitization_failed(old if untrusted_side == "old" else new)
+        with pytest.raises(SanitizationTrustError, match="allow_unverified=True"):
+            diff_to_stix(old, new, out)
+        assert not out.exists()
+        assert diff_to_stix(old, new, out, allow_unverified=True)["type"] == "bundle"
+    finally:
+        old.unlink(missing_ok=True)
+        new.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
+
+
+def test_cli_stix_diff_requires_explicit_unsafe_override(tmp_path, capsys):
+    from icarus.integrations.hygeia import mark_sanitization_failed
+
+    old = _build_db()
+    new = _build_db()
+    out = tmp_path / "cli.json"
+    try:
+        mark_sanitization_failed(old)
+        args = types.SimpleNamespace(old=str(old), new=str(new), stix=str(out))
+        with pytest.raises(SystemExit) as exc:
+            cli.cmd_diff(args)
+        assert exc.value.code == 3
+        assert "allow_unverified=True" in capsys.readouterr().err
+        assert not out.exists()
+
+        args.allow_unverified = True
+        cli.cmd_diff(args)
+        assert out.exists()
+    finally:
+        old.unlink(missing_ok=True)
+        new.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
+
+
+def test_stix_export_rejects_active_wal_without_sidecar_changes(tmp_path):
+    from icarus.core.schema import open_db
+
+    db = _build_db()
+    out = tmp_path / "wal.json"
+    writer = open_db(db)
+    try:
+        writer.execute("INSERT INTO files (path, filename) VALUES ('/wal', 'wal')")
+        writer.commit()
+        assert Path(str(db) + "-wal").stat().st_size > 0
+        before = _source_bytes(db)
+        with pytest.raises(SanitizationTrustError, match="active WAL"):
+            export_to_stix(db, out)
+        assert not out.exists()
+        assert _source_bytes(db) == before
+    finally:
+        writer.close()
+        db.unlink(missing_ok=True)
+        out.unlink(missing_ok=True)
+def _build_identity_fixture(
+    db_path: Path,
+    *,
+    insertion_seed: int,
+    filler_count: int,
+    target_path: str = "/same/target.bin",
+    target_sha256: str = "a" * 64,
+) -> None:
+    """Build equivalent rows while randomizing every table's insertion order."""
+    initialize_database(db_path, {"source": "identity-test"})
+    conn = sqlite3.connect(str(db_path))
+    entities = ["target", *(f"filler-{index}" for index in range(filler_count))]
+    randomizer = random.Random(insertion_seed)
+
+    def shuffled():
+        result = list(entities)
+        randomizer.shuffle(result)
+        return result
+
+    file_ids = {}
+    for entity in shuffled():
+        is_target = entity == "target"
+        cursor = conn.execute(
+            "INSERT INTO files (path, filename, sha256, file_type, observed_time) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                target_path if is_target else f"/unrelated/{entity}.bin",
+                "target.bin" if is_target else f"{entity}.bin",
+                target_sha256 if is_target else "b" * 64,
+                "binary",
+                "2026-07-18T12:34:56Z",
+            ),
+        )
+        file_ids[entity] = cursor.lastrowid
+
+    binary_ids = {}
+    for entity in shuffled():
+        cursor = conn.execute(
+            "INSERT INTO binaries "
+            "(file_id, bundle_id, executable_name, arch, observed_time) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                file_ids[entity],
+                f"com.example.{entity}",
+                f"{entity}.bin",
+                "arm64",
+                "2026-07-18T12:34:56Z",
+            ),
+        )
+        binary_ids[entity] = cursor.lastrowid
+
+    daemon_ids = {}
+    for entity in shuffled():
+        cursor = conn.execute(
+            "INSERT INTO daemons (label, plist_path, program, observed_time) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                f"com.example.{entity}",
+                f"/Library/LaunchDaemons/{entity}.plist",
+                f"/usr/bin/{entity}",
+                "2026-07-18T12:34:56Z",
+            ),
+        )
+        daemon_ids[entity] = cursor.lastrowid
+
+    entitlement_ids = {}
+    for entity in shuffled():
+        cursor = conn.execute(
+            "INSERT INTO entitlements (binary_id, key, value, observed_time) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                binary_ids[entity],
+                f"com.example.{entity}",
+                "true",
+                "2026-07-18T12:34:56Z",
+            ),
+        )
+        entitlement_ids[entity] = cursor.lastrowid
+
+    observations = [
+        ("files", file_ids["target"], "target-file-seen"),
+        ("binaries", binary_ids["target"], "target-binary-seen"),
+        ("daemons", daemon_ids["target"], "target-daemon-seen"),
+        ("entitlements", entitlement_ids["target"], "target-entitlement-seen"),
+    ]
+    observations.extend(
+        ("files", file_ids[entity], f"{entity}-seen")
+        for entity in entities if entity != "target"
+    )
+    randomizer.shuffle(observations)
+    for entity_table, entity_id, event_type in observations:
+        conn.execute(
+            "INSERT INTO observations (entity_table, entity_id, observed_at, event_type) "
+            "VALUES (?, ?, ?, ?)",
+            (entity_table, entity_id, "2026-07-18T12:34:56Z", event_type),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _target_stix_ids(bundle: dict) -> dict:
+    """Return target IDs by semantic marker, independent of database row IDs."""
+    ids = {}
+    for obj in bundle["objects"]:
+        if obj["type"] == "file" and obj.get("hashes", {}).get("SHA-256", "").lower() == "a" * 64:
+            ids["file"] = obj["id"]
+        elif (
+            obj["type"] == "file"
+            and obj.get("x_icarus_binary", {}).get("bundle_id") == "com.example.target"
+        ):
+            ids["binary"] = obj["id"]
+        elif obj["type"] == "infrastructure" and obj["name"] == "com.example.target":
+            ids["daemon"] = obj["id"]
+        elif obj["type"] == "course-of-action" and obj["name"] == "com.example.target":
+            ids["entitlement"] = obj["id"]
+        elif obj.get("x_icarus_event_type", "").startswith("target-"):
+            ids[obj["x_icarus_event_type"]] = obj["id"]
+    return ids
+
+
+def test_stix_identity_is_stable_across_randomized_rebuild_order_and_unrelated_rows(tmp_path):
+    """#90: stable IDs and refs survive deterministic randomized row-ID permutations."""
+    baseline_db = tmp_path / "baseline.db"
+    _build_identity_fixture(baseline_db, insertion_seed=0, filler_count=0)
+    baseline = export_to_stix(
+        baseline_db, tmp_path / "baseline.json", allow_unverified=True
+    )
+    baseline_ids = _target_stix_ids(baseline)
+
+    for seed in range(1, 17):
+        variant_db = tmp_path / f"variant-{seed}.db"
+        _build_identity_fixture(
+            variant_db,
+            insertion_seed=seed,
+            filler_count=seed % 5 + 1,
+            target_sha256="A" * 64,
+        )
+        variant = export_to_stix(
+            variant_db,
+            tmp_path / f"variant-{seed}.json",
+            allow_unverified=True,
+        )
+        variant_ids = _target_stix_ids(variant)
+        assert variant_ids == baseline_ids
+
+        objects = {obj["id"]: obj for obj in variant["objects"]}
+        assert objects[variant_ids["target-file-seen"]]["object_refs"] == [variant_ids["file"]]
+        assert objects[variant_ids["target-binary-seen"]]["object_refs"] == [variant_ids["binary"]]
+        assert (
+            objects[variant_ids["target-daemon-seen"]]["sighting_of_ref"]
+            == variant_ids["daemon"]
+        )
+        assert (
+            objects[variant_ids["target-entitlement-seen"]]["sighting_of_ref"]
+            == variant_ids["entitlement"]
+        )
+
+
+def test_stix_identity_changes_when_a_material_domain_attribute_changes(tmp_path):
+    original_db = tmp_path / "original.db"
+    changed_db = tmp_path / "changed.db"
+    _build_identity_fixture(original_db, insertion_seed=0, filler_count=0)
+    _build_identity_fixture(
+        changed_db,
+        insertion_seed=1,
+        filler_count=2,
+        target_path="/same/renamed-target.bin",
+    )
+
+    original_ids = _target_stix_ids(
+        export_to_stix(original_db, tmp_path / "original.json", allow_unverified=True)
+    )
+    changed_ids = _target_stix_ids(
+        export_to_stix(changed_db, tmp_path / "changed.json", allow_unverified=True)
+    )
+    for key in ("file", "binary", "entitlement", "target-file-seen", "target-binary-seen"):
+        assert changed_ids[key] != original_ids[key]
+
+
+def test_stix_preserves_distinct_raw_paths_without_hashes(tmp_path):
+    """Path normalization must not collapse valid, differently-valued rows."""
+    db = tmp_path / "paths.db"
+    initialize_database(db)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT INTO files (path, filename, size, file_type) VALUES (?, ?, ?, ?)",
+            [
+                ("/tmp/../same", "same", 1, "data"),
+                ("/same", "same", 2, "data"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    bundle = export_to_stix(
+        db,
+        tmp_path / "paths.json",
+        include_tables=["files"],
+        allow_unverified=True,
+    )
+    files = [obj for obj in bundle["objects"] if obj["type"] == "file"]
+    assert {obj["size"] for obj in files} == {1, 2}
+    assert len({obj["id"] for obj in files}) == 2
+
+
+def test_stix_entitlement_values_have_distinct_ids_and_observation_references(tmp_path):
+    """A schema-valid same-key entitlement pair must not collide in STIX."""
+    db = tmp_path / "entitlements.db"
+    initialize_database(db)
+    conn = sqlite3.connect(str(db))
+    try:
+        file_id = conn.execute(
+            "INSERT INTO files (path, filename) VALUES (?, ?)",
+            ("/same/tool", "tool"),
+        ).lastrowid
+        binary_id = conn.execute(
+            "INSERT INTO binaries (file_id, executable_name) VALUES (?, ?)",
+            (file_id, "tool"),
+        ).lastrowid
+        entitlement_ids = []
+        for value in ("true", "false"):
+            entitlement_ids.append(
+                conn.execute(
+                    "INSERT INTO entitlements (binary_id, key, value, observed_time) "
+                    "VALUES (?, ?, ?, ?)",
+                    (binary_id, "com.example.flag", value, "2026-07-18T12:34:56Z"),
+                ).lastrowid
+            )
+        for entitlement_id in entitlement_ids:
+            conn.execute(
+                "INSERT INTO observations (entity_table, entity_id, observed_at, event_type) "
+                "VALUES (?, ?, ?, ?)",
+                ("entitlements", entitlement_id, "2026-07-18T12:34:56Z", "entitlement-seen"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    bundle = export_to_stix(
+        db,
+        tmp_path / "entitlements.json",
+        include_tables=["observations"],
+        allow_unverified=True,
+    )
+    entitlements = [obj for obj in bundle["objects"] if obj["type"] == "course-of-action"]
+    sightings = [obj for obj in bundle["objects"] if obj["type"] == "sighting"]
+    assert {obj["description"] for obj in entitlements} == {"true", "false"}
+    assert len({obj["id"] for obj in entitlements}) == 2
+    assert {obj["sighting_of_ref"] for obj in sightings} == {obj["id"] for obj in entitlements}
 
 
 def test_stix_export_produces_bundle():
@@ -127,6 +550,131 @@ def test_stix_diff_export():
         out.unlink(missing_ok=True)
 
 
+def test_stix_diff_change_notes_preserve_the_changed_fields_contract(
+    monkeypatch, tmp_path,
+):
+    """Every current changed category exports the differ's actual values."""
+    results = {
+        "files_changed": DiffResult(
+            added=[], removed=[], table="files", key_column="path",
+            changed=[{
+                "path": "/same", "changed_fields": ["sha256"],
+                "old_sha256": "aaaa", "new_sha256": "bbbb",
+            }],
+        ),
+        "observations": DiffResult(
+            added=[], removed=[], table="observations", key_column="entity_key",
+            changed=[{
+                "entity_key": "/subject",
+                "changed_fields": ["properties", "observer"],
+                "old_properties": {"decision": False, "items": [None, "old"]},
+                "new_properties": {"decision": True, "items": [None, "new"]},
+                "old_observer": None,
+                "new_observer": "sensor-a",
+            }],
+        ),
+        "resolution": DiffResult(
+            added=[], removed=[], table="bags", key_column="canonical_key",
+            changed=[{
+                "canonical_key": "bag.common",
+                "changed_fields": ["atom_count", "score"],
+                "old_atom_count": 2, "new_atom_count": 3,
+                "old_score": 0.1, "new_score": 0.9,
+            }],
+        ),
+        "structural": DiffResult(
+            added=[], removed=[], changed=[], table="cross_table", key_column="entity",
+            structural=[{
+                "type": "binary_file_moved", "entity": "tool",
+                "changed_fields": ["file_path"],
+                "old_file_path": "/old/tool", "new_file_path": "/new/tool",
+            }],
+        ),
+    }
+
+    class FakeDiffer:
+        def __init__(self, *_args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def full_diff(self):
+            return results
+
+    monkeypatch.setattr("icarus.core.differ.IcarusDiffer", FakeDiffer)
+    bundle = diff_to_stix(
+        tmp_path / "old.db",
+        tmp_path / "new.db",
+        tmp_path / "diff.json",
+        allow_unverified=True,
+    )
+    notes = {
+        (note["x_icarus_diff_category"], note["x_icarus_diff_table"]): note
+        for note in bundle["objects"] if note["type"] == "note"
+    }
+    expected = {
+        ("property_change", "files_changed"): [{
+            "field": "sha256", "old_value": "aaaa", "new_value": "bbbb",
+        }],
+        ("property_change", "observations"): [{
+            "field": "properties",
+            "old_value": {"decision": False, "items": [None, "old"]},
+            "new_value": {"decision": True, "items": [None, "new"]},
+        }, {
+            "field": "observer", "old_value": None, "new_value": "sensor-a",
+        }],
+        ("property_change", "resolution"): [
+            {"field": "atom_count", "old_value": 2, "new_value": 3},
+            {"field": "score", "old_value": 0.1, "new_value": 0.9},
+        ],
+        ("structural", "structural"): [{
+            "field": "file_path", "old_value": "/old/tool", "new_value": "/new/tool",
+        }],
+    }
+    assert set(notes) == set(expected)
+    for key, changed_fields in expected.items():
+        note = notes[key]
+        assert note["x_icarus_diff_changed_fields"] == changed_fields
+        assert "? -> ?" not in note["content"]
+        for field in changed_fields:
+            assert f"{field['field']}:" in note["content"]
+            assert canonical_diff_value(field["old_value"]) in note["content"]
+            assert canonical_diff_value(field["new_value"]) in note["content"]
+
+
+def test_stix_diff_rejects_a_change_without_structured_fields(monkeypatch, tmp_path):
+    class FakeDiffer:
+        def __init__(self, *_args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def full_diff(self):
+            return {
+                "files_changed": DiffResult(
+                    added=[], removed=[], table="files", key_column="path",
+                    changed=[{"path": "/same", "old_value": "old", "new_value": "new"}],
+                ),
+            }
+
+    monkeypatch.setattr("icarus.core.differ.IcarusDiffer", FakeDiffer)
+    with pytest.raises(ValueError, match="changed_fields"):
+        diff_to_stix(
+            tmp_path / "old.db",
+            tmp_path / "new.db",
+            tmp_path / "diff.json",
+            allow_unverified=True,
+        )
+
+
 def test_stix_diff_export_includes_structural_change():
     """Finding #58/#163: diff_to_stix must not silently drop structural changes."""
     db_old = _build_db()
@@ -188,6 +736,11 @@ def test_stix_diff_export_includes_structural_change():
         assert len(structural_notes) == 1
         assert "zzz_structural_probe.exe" in structural_notes[0]["content"]
         assert structural_notes[0]["x_icarus_diff_table"] == "structural"
+        assert structural_notes[0]["x_icarus_diff_changed_fields"] == [{
+            "field": "file_path",
+            "old_value": "/synthetic/old/zzz_structural_probe.exe",
+            "new_value": "/synthetic/new/zzz_structural_probe.exe",
+        }]
     finally:
         db_old.unlink(missing_ok=True)
         db_new.unlink(missing_ok=True)
@@ -275,7 +828,8 @@ def test_stix_daemon_observation_becomes_sighting_with_resolved_ref():
         assert TIMESTAMP_RE.match(obj.get("modified", "")), obj.get("modified")
         assert TIMESTAMP_RE.match(obj.get("first_seen", "")), obj.get("first_seen")
         assert TIMESTAMP_RE.match(obj.get("last_seen", "")), obj.get("last_seen")
-        assert obj["sighting_of_ref"] == _entity_ref("daemons", daemon_id)
+        daemon = next(o for o in bundle["objects"] if o["type"] == "infrastructure")
+        assert obj["sighting_of_ref"] == daemon["id"]
         assert obj["sighting_of_ref"] in {o["id"] for o in bundle["objects"]}
     finally:
         db.unlink(missing_ok=True)

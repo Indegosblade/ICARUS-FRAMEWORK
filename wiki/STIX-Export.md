@@ -22,7 +22,7 @@ target fails the export instead of producing a dangling reference.
 ### CLI
 
 ```bash
-# Export a diff as STIX 2.1 bundle
+# Export a diff as STIX 2.1 bundle (both inputs require trusted sanitization)
 icarus diff old.db new.db --stix changes.json
 ```
 
@@ -33,6 +33,8 @@ from icarus.integrations.stix_export import export_to_stix, diff_to_stix
 from pathlib import Path
 
 # Export all entities from a database
+# Default export requires a current verified sanitization audit. A database
+# intentionally built with --skip-hygeia retains its documented exception.
 bundle = export_to_stix(
     db_path=Path("intel.db"),
     output_path=Path("entities.json"),

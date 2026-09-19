@@ -172,7 +172,8 @@ with EntityResolver("intel.db", experimental=True) as r:
     r.resolve_scored("binaries")                        # block -> score -> cluster -> merge
     # r.resolve("binaries", blocking_keys=["executable_name"])  # exact-key MVP
 
-# Export to STIX 2.1
+# Export to STIX 2.1 (requires a verified build; an explicit --skip-hygeia
+# build remains an intentional unsafe exception)
 export_to_stix(Path("intel.db"), Path("bundle.json"))
 ```
 
