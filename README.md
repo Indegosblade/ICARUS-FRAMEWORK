@@ -444,7 +444,10 @@ made the framework's guarantees true on real data rather than on fixtures. Highl
   `query` refuses it unless `--allow-unverified`.
 - **Atomic, honest builds.** `--fresh` builds into a temp file and swaps on full
   success only; an existing output is refused rather than silently unioned; resume
-  requires an exact source/parser/config fingerprint match.
+  restores the original run/version identity and requires an exact
+  source/parser/config fingerprint match. Keep a crashed build's source immutable:
+  ICARUS refuses ordinary path/type/size/mtime tree changes, while deliberately
+  timestamp-preserving same-size replacement requires a clean `--fresh` rebuild.
 - **Correct output.** Cross-database diffs use natural keys (not local row ids);
   every entity row carries provenance (`source_version_id` + `observed_time`); STIX
   2.1 export validates under strict `stix2.parse` with no dangling refs; diff reports

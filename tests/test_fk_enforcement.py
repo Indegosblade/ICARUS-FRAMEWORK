@@ -116,4 +116,6 @@ def test_pipeline_raw_connections_are_checkpoint_only():
         "str(self.checkpoint_db)",
         "str(self.checkpoint_db)",
         "str(self.checkpoint_db)",
+        "str(self.checkpoint_db)",
+        "str(self.checkpoint_db)",
     ]
