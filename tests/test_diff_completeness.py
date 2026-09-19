@@ -295,7 +295,7 @@ def test_sha256_change_still_detected_and_labelled(tmp_path):
     assert changed[0]["path"] == "/f"
     assert changed[0]["change_basis"] == "sha256"
     assert changed[0]["changed_fields"] == ["sha256"]
-    assert "sha256: hash_old -> hash_new" in result.to_markdown()
+    assert 'sha256: "hash_old" -> "hash_new"' in result.to_markdown()
 
 
 # --------------------------------------------------------------------------- #

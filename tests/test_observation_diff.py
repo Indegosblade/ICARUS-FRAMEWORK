@@ -104,6 +104,44 @@ def test_observer_and_confidence_changes_are_reported(
     assert result.changed[0][f"new_{field}"] == new_value
 
 
+@pytest.mark.parametrize(
+    ("old_value", "new_value", "expected"),
+    [
+        (None, "sensor-a", 'observer: null -> "sensor-a"'),
+        ("sensor-a", None, 'observer: "sensor-a" -> null'),
+    ],
+)
+def test_nullable_observer_changes_render_as_json_values(
+    tmp_path, old_value, new_value, expected,
+):
+    result = _diff(
+        tmp_path, [{"observer": old_value}], [{"observer": new_value}],
+    )
+
+    assert result.changed[0]["old_observer"] == old_value
+    assert result.changed[0]["new_observer"] == new_value
+    markdown = result.to_markdown()
+    assert expected in markdown
+    assert "? ->" not in markdown and "-> ?" not in markdown
+
+
+def test_nested_boolean_properties_render_as_canonical_json(tmp_path):
+    old = '{"items":[null,"old"],"enabled":false}'
+    new = '{"items":[null,"new"],"enabled":true}'
+    result = _diff(tmp_path, [{"properties": old}], [{"properties": new}])
+
+    assert result.changed[0]["old_properties"] == {
+        "items": [None, "old"], "enabled": False,
+    }
+    assert result.changed[0]["new_properties"] == {
+        "items": [None, "new"], "enabled": True,
+    }
+    assert (
+        'properties: {"enabled":false,"items":[null,"old"]} -> '
+        '{"enabled":true,"items":[null,"new"]}'
+    ) in result.to_markdown()
+
+
 def test_duplicate_observations_use_multiset_semantics(tmp_path):
     denied = {"properties": '{"decision":"denied"}'}
     allowed = {"properties": '{"decision":"allowed"}'}

@@ -51,7 +51,7 @@ def _md_sanitize(value: Any) -> str:
     does not work inside a Markdown code span — a raw backtick would still close
     the span — so the character itself must never survive.
     """
-    text = "?" if value is None else str(value)
+    text = "null" if value is None else str(value)
     text = text.replace("\\", "\\\\")          # 1. escape literal backslashes
     text = text.replace("`", "\\x60")          # 2. defuse code-span-closing backticks
     text = text.replace("|", "\\|")            # 3. escape table-cell pipes
@@ -59,6 +59,23 @@ def _md_sanitize(value: Any) -> str:
         lambda m: f"\\x{ord(m.group()):02x}", text
     )
     return text
+
+
+def canonical_diff_value(value: Any) -> str:
+    """Render a valid diff value as compact, type-preserving JSON text.
+
+    This shared representation keeps text consumers aligned with the typed JSON
+    diff: ``None`` is ``null``, booleans stay lowercase, strings stay quoted,
+    and collections are sorted deterministically. Boundary-specific renderers
+    may then escape this text without replacing a valid value with a placeholder.
+    """
+    try:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("changed field values must be JSON serializable") from exc
 
 
 def changed_field_values(item: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -140,13 +157,9 @@ class DiffResult:
                     field_name = change["field"]
                     old_value = change["old_value"]
                     new_value = change["new_value"]
-                    if isinstance(old_value, (dict, list)):
-                        old_value = json.dumps(old_value, sort_keys=True, separators=(",", ":"))
-                    if isinstance(new_value, (dict, list)):
-                        new_value = json.dumps(new_value, sort_keys=True, separators=(",", ":"))
                     details.append(
-                        f"{field_name}: {_md_sanitize(old_value)} -> "
-                        f"{_md_sanitize(new_value)}"
+                        f"{field_name}: {_md_sanitize(canonical_diff_value(old_value))} -> "
+                        f"{_md_sanitize(canonical_diff_value(new_value))}"
                     )
                 if details:
                     label += f" ({'; '.join(details)})"

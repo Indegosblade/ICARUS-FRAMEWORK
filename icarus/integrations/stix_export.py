@@ -336,7 +336,7 @@ def _change_fields(item: dict, category: str, table: str) -> List[dict]:
         ) from exc
 
     try:
-        json.dumps(fields, sort_keys=True, separators=(",", ":"))
+        json.dumps(fields, sort_keys=True, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"Malformed {category} diff record for {table}: "
@@ -347,14 +347,11 @@ def _change_fields(item: dict, category: str, table: str) -> List[dict]:
 
 def _change_content(category: str, table: str, item_key: object, fields: List[dict]) -> str:
     """Render validated change fields without losing their labels or values."""
-    def display(value: object) -> str:
-        if isinstance(value, (dict, list)):
-            return json.dumps(value, sort_keys=True, separators=(",", ":"))
-        return str(value)
+    from icarus.core.differ import canonical_diff_value
 
     details = "; ".join(
-        f"{field['field']}: {display(field['old_value'])} -> "
-        f"{display(field['new_value'])}"
+        f"{field['field']}: {canonical_diff_value(field['old_value'])} -> "
+        f"{canonical_diff_value(field['new_value'])}"
         for field in fields
     )
     return f"{category.capitalize()} in {table}: {item_key} ({details})"

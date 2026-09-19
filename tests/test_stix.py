@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from icarus.core.differ import DiffResult
+from icarus.core.differ import DiffResult, canonical_diff_value
 from icarus.core.schema import initialize_database
 from icarus.integrations.stix_export import (
     _entity_ref,
@@ -143,9 +143,12 @@ def test_stix_diff_change_notes_preserve_the_changed_fields_contract(
         "observations": DiffResult(
             added=[], removed=[], table="observations", key_column="entity_key",
             changed=[{
-                "entity_key": "/subject", "changed_fields": ["properties"],
-                "old_properties": {"decision": "denied"},
-                "new_properties": {"decision": "allowed"},
+                "entity_key": "/subject",
+                "changed_fields": ["properties", "observer"],
+                "old_properties": {"decision": False, "items": [None, "old"]},
+                "new_properties": {"decision": True, "items": [None, "new"]},
+                "old_observer": None,
+                "new_observer": "sensor-a",
             }],
         ),
         "resolution": DiffResult(
@@ -191,8 +194,11 @@ def test_stix_diff_change_notes_preserve_the_changed_fields_contract(
             "field": "sha256", "old_value": "aaaa", "new_value": "bbbb",
         }],
         ("property_change", "observations"): [{
-            "field": "properties", "old_value": {"decision": "denied"},
-            "new_value": {"decision": "allowed"},
+            "field": "properties",
+            "old_value": {"decision": False, "items": [None, "old"]},
+            "new_value": {"decision": True, "items": [None, "new"]},
+        }, {
+            "field": "observer", "old_value": None, "new_value": "sensor-a",
         }],
         ("property_change", "resolution"): [
             {"field": "atom_count", "old_value": 2, "new_value": 3},
@@ -209,14 +215,8 @@ def test_stix_diff_change_notes_preserve_the_changed_fields_contract(
         assert "? -> ?" not in note["content"]
         for field in changed_fields:
             assert f"{field['field']}:" in note["content"]
-            old_value = field["old_value"]
-            new_value = field["new_value"]
-            if isinstance(old_value, (dict, list)):
-                old_value = json.dumps(old_value, sort_keys=True, separators=(",", ":"))
-            if isinstance(new_value, (dict, list)):
-                new_value = json.dumps(new_value, sort_keys=True, separators=(",", ":"))
-            assert str(old_value) in note["content"]
-            assert str(new_value) in note["content"]
+            assert canonical_diff_value(field["old_value"]) in note["content"]
+            assert canonical_diff_value(field["new_value"]) in note["content"]
 
 
 def test_stix_diff_rejects_a_change_without_structured_fields(monkeypatch, tmp_path):
