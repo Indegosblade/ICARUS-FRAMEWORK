@@ -60,9 +60,11 @@ def _manifest_for(module: object) -> Optional[ParserManifest]:
         return None
 
 
-def _register(parser_cls: type, manifest: Optional[ParserManifest]) -> None:
+def _register(
+    parser_cls: type, manifest: Optional[ParserManifest], *, origin: str
+) -> None:
     try:
-        _REGISTRY.register(parser_cls, manifest)
+        _REGISTRY.register(parser_cls, manifest, origin=origin)
     except Exception as exc:  # a parser whose __init__/name fails must not abort discovery
         log.warning(
             "Parser %s failed to register: %s",
@@ -76,9 +78,13 @@ def _register_directory_parsers() -> None:
     def _on_error(name: str) -> None:
         log.warning("Could not import parser package %s during discovery", name)
 
-    for modinfo in pkgutil.walk_packages(
-        [str(_PARSERS_DIR)], prefix=__name__ + ".", onerror=_on_error
-    ):
+    modules = sorted(
+        pkgutil.walk_packages(
+            [str(_PARSERS_DIR)], prefix=__name__ + ".", onerror=_on_error
+        ),
+        key=lambda item: item.name,
+    )
+    for modinfo in modules:
         segments = modinfo.name.split(".")
         if modinfo.ispkg or segments[-1] in _SKIP_LEAF or _SKIP_PKG.intersection(segments):
             continue
@@ -89,7 +95,12 @@ def _register_directory_parsers() -> None:
             continue
         manifest = _manifest_for(module)
         for cls in _concrete_parsers(module):
-            _register(cls, manifest)
+            module_file = getattr(module, "__file__", "unknown path")
+            _register(
+                cls,
+                manifest,
+                origin=f"module {module.__name__} ({module_file})",
+            )
 
 
 def _register_entrypoint_parsers() -> None:
@@ -97,7 +108,10 @@ def _register_entrypoint_parsers() -> None:
     try:
         from importlib.metadata import entry_points
 
-        eps = list(entry_points(group="icarus.parsers"))
+        eps = sorted(
+            entry_points(group="icarus.parsers"),
+            key=lambda ep: (ep.name, ep.value),
+        )
     except Exception as exc:  # older metadata backends / none installed
         log.debug("No entry-point parsers available: %s", exc)
         return
@@ -110,7 +124,12 @@ def _register_entrypoint_parsers() -> None:
         candidates = [loaded] if inspect.isclass(loaded) else list(_concrete_parsers(loaded))
         for cls in candidates:
             if inspect.isclass(cls) and issubclass(cls, BaseParser) and not inspect.isabstract(cls):
-                _register(cls, None)
+                distribution = getattr(getattr(ep, "dist", None), "name", "unknown distribution")
+                _register(
+                    cls,
+                    None,
+                    origin=f"entry point {distribution}:{ep.name} ({ep.value})",
+                )
 
 
 _register_directory_parsers()
