@@ -30,6 +30,15 @@
    undocumented).
 6. **Dependencies / CI actions** (supply chain).
 
+## Sanitization-marker limits
+
+The HYGEIA status and audit records are mutable SQLite metadata, not a
+cryptographic attestation. ICARUS validates their exact current schema and
+invalidates them on its supported write path, which catches stale, malformed,
+and incomplete pipeline state. An actor able to alter the database file can
+still forge matching metadata; recipients who need provenance against that
+actor require an authenticated delivery channel or external signature.
+
 ## Abuse cases → mitigation status
 
 | # | Abuse case | Mitigation | Residual (issue) |

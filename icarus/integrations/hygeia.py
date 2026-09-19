@@ -37,6 +37,7 @@ except PackageNotFoundError:
 ENGINE_NAME = "hygeia.sqlite_sanitizer.sanitize_database_generic"
 MAX_RECORDED_FINDINGS = 100
 AUDIT_VERSION = 1
+FINAL_GATE_NAME = "pipeline-final"
 
 # This metadata is evidence about the database contents, not durable database
 # configuration.  Any supported write must remove it in that same transaction.
@@ -419,13 +420,15 @@ def _scan_database(db_path: Path, registry, fingerprint_key: bytes) -> Dict[str,
     }
 
 
-def _record_safe_audit(db_path: Path, engine: Dict[str, str], audit: Dict[str, Any]) -> None:
-    """Persist only safe sanitizer evidence after the post-gate succeeds."""
+def _record_finalized_audit(db_path: Path, engine: Dict[str, str], audit: Dict[str, Any]) -> None:
+    """Persist evidence only after the pipeline's final post-write gate succeeds."""
     payload = {
         "audit_version": AUDIT_VERSION,
         "engine": engine,
         "verified": True,
+        "gate": FINAL_GATE_NAME,
         "post_gate": {"passed": True, "total_findings": 0},
+        "checked_rows": audit["checked_rows"],
         "total_findings": audit["total_findings"],
         "patterns_found": audit["patterns_found"],
         "findings": audit["findings"],
@@ -499,17 +502,25 @@ def _has_valid_verified_audit(rows: Dict[str, str]) -> bool:
         audit = json.loads(rows["hygeia_audit"])
     except (KeyError, TypeError, ValueError):
         return False
+    expected_engine = {
+        "engine": ENGINE_NAME,
+        "version": _HYGEIA_VERSION,
+        "mode": "fail-closed",
+    }
     return (
-        isinstance(engine, dict)
-        and all(
-            isinstance(engine.get(key), str) and engine[key]
-            for key in ("engine", "version", "mode")
-        )
+        _HYGEIA_VERSION != "unavailable"
+        and engine == expected_engine
         and isinstance(audit, dict)
         and audit.get("audit_version") == AUDIT_VERSION
         and audit.get("engine") == engine
         and audit.get("verified") is True
+        and audit.get("gate") == FINAL_GATE_NAME
         and audit.get("post_gate") == {"passed": True, "total_findings": 0}
+        and isinstance(audit.get("checked_rows"), int)
+        and audit.get("total_findings") == 0
+        and audit.get("patterns_found") == {}
+        and audit.get("findings") == []
+        and audit.get("findings_truncated") is False
     )
 
 
@@ -621,7 +632,6 @@ def sanitize_output(db_path: Path) -> Dict[str, Any]:
             f"finding(s) of type(s): {residual_types}"
         )
 
-    _record_safe_audit(db_path, engine, before)
     return {
         "engine": engine,
         "checked_rows": before["checked_rows"],

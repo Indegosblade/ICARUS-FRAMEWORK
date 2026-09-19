@@ -45,7 +45,7 @@ icarus query DATABASE [--sql QUERY] [--search TERMS] [--table TABLE] [--stats] [
 | `--search` | Full-text search query (FTS5) |
 | `--table` | Table for FTS search (default: files) |
 | `--stats` | Show table row counts |
-| `--allow-unverified` | Query a database whose sanitization **failed**. By default such a database is refused (exit code 3) because it may contain unsanitized data; a verified or `--skip-hygeia` database queries normally. |
+| `--allow-unverified` | Query a database whose sanitization failed or is unmarked. By default either is refused (exit code 3) because it may contain unsanitized data; a verified or `--skip-hygeia` database queries normally. |
 
 **Examples:**
 ```bash
@@ -84,7 +84,7 @@ icarus exec intel.db --sql "UPDATE files SET marking = 'REVIEWED' WHERE path = '
 Compare two intelligence databases.
 
 ```bash
-icarus diff OLD NEW [--output PATH] [--stix PATH]
+icarus diff OLD NEW [--output PATH] [--stix PATH] [--allow-unverified]
 ```
 
 | Flag | Description |
@@ -93,6 +93,7 @@ icarus diff OLD NEW [--output PATH] [--stix PATH]
 | `NEW` | Path to newer database (positional) |
 | `--output, -o` | Write markdown report to file (default: stdout) |
 | `--stix` | Export diff as STIX 2.1 bundle JSON |
+| `--allow-unverified` | Permit an unsafe STIX export when either input failed sanitization or is unmarked. |
 
 **Examples:**
 ```bash

@@ -200,8 +200,18 @@ def cmd_exec(args):
 
 def cmd_diff(args):
     if args.stix:
-        from icarus.integrations.stix_export import diff_to_stix
-        bundle = diff_to_stix(Path(args.old), Path(args.new), Path(args.stix))
+        from icarus.integrations.stix_export import SanitizationTrustError, diff_to_stix
+
+        try:
+            bundle = diff_to_stix(
+                Path(args.old),
+                Path(args.new),
+                Path(args.stix),
+                allow_unverified=getattr(args, "allow_unverified", False),
+            )
+        except SanitizationTrustError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(3)
         print(f"STIX bundle written to {args.stix} ({len(bundle['objects'])} objects)")
         return
 
@@ -389,6 +399,11 @@ def main():
     diff_p.add_argument("new", help="Path to newer database")
     diff_p.add_argument("--output", "-o", help="Write report to file (default: stdout)")
     diff_p.add_argument("--stix", help="Export diff as STIX 2.1 bundle JSON")
+    diff_p.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="Export STIX from failed or unmarked inputs (unsafe)",
+    )
 
     # parser
     parser_p = sub.add_parser("parser", help="Parser management commands")

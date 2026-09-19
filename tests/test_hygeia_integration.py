@@ -106,15 +106,10 @@ def test_findings_and_metadata_never_retain_raw_secret(secret_db):
     stats = hygeia_mod.sanitize_output(secret_db)
 
     conn = sqlite3.connect(str(secret_db))
-    audit_json = conn.execute(
-        "SELECT value FROM metadata WHERE key = 'hygeia_audit'"
-    ).fetchone()[0]
-    engine_json = conn.execute(
-        "SELECT value FROM metadata WHERE key = 'hygeia_engine'"
-    ).fetchone()[0]
+    metadata = conn.execute("SELECT key, value FROM metadata").fetchall()
     conn.close()
 
-    serialized = json.dumps({"before": before, "stats": stats, "audit": audit_json})
+    serialized = json.dumps({"before": before, "stats": stats, "metadata": metadata})
     for secret in SYNTHETIC_SECRETS.values():
         assert secret not in serialized
 
@@ -124,8 +119,8 @@ def test_findings_and_metadata_never_retain_raw_secret(secret_db):
         finding["fingerprint"].startswith("hmac-sha256:")
         for finding in before["findings"]
     )
-    assert json.loads(audit_json)["verified"] is True
-    assert json.loads(engine_json)["mode"] == "fail-closed"
+    assert "hygeia_audit" not in dict(metadata)
+    assert "hygeia_engine" not in dict(metadata)
 
 
 def test_full_pipeline_sanitizes_seeded_cloudtrail_secret(tmp_path):
@@ -160,6 +155,7 @@ def test_full_pipeline_sanitizes_seeded_cloudtrail_secret(tmp_path):
     assert context.stats["sanitizer"]["mode"] == "fail-closed"
     assert context.stats["sanitize"]["verified"] is True
     assert context.stats["sanitize_final_gate"]["passed"] is True
+    assert hygeia_mod.sanitization_status(output) == "verified"
     assert secret not in _all_public_text(output)
     verification = hygeia_mod.verify_clean(output)
     assert verification["passed"] is True, verification
@@ -226,6 +222,32 @@ def test_final_pipeline_gate_invalidates_clean_marker_on_late_secret(tmp_path):
     conn.close()
     assert status == "FAILED: output is not safe to share"
     assert audit is None
+
+
+def test_pipeline_interruption_after_sanitize_never_publishes_verified_marker(tmp_path):
+    from icarus.core.pipeline import create_default_pipeline
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "input.json").write_text('{"safe": true}', encoding="utf-8")
+    output = tmp_path / "output.db"
+    pipeline = create_default_pipeline(source, output, "generic/json")
+
+    def interrupt_finalization():
+        raise RuntimeError("simulated interruption after sanitize")
+
+    pipeline._finalize_version_record = interrupt_finalization
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        pipeline.run(resume=False)
+
+    assert hygeia_mod.sanitization_status(output) == "unknown"
+    conn = sqlite3.connect(str(output))
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM metadata WHERE key IN ('hygeia_status', 'hygeia_audit')"
+        ).fetchone() is None
+    finally:
+        conn.close()
 
 
 def test_noop_sanitizer_is_caught_by_mandatory_post_gate(secret_db, monkeypatch):
@@ -348,12 +370,9 @@ def test_structural_columns_survive_value_pattern_false_positives(tmp_path):
     conn = sqlite3.connect(str(db_path))
     paths = [r[0] for r in conn.execute("SELECT path FROM files")]
     props = conn.execute("SELECT properties FROM observations").fetchone()[0]
-    status = conn.execute(
-        "SELECT value FROM metadata WHERE key = 'hygeia_status'"
-    ).fetchone()[0]
     conn.close()
 
-    assert status == "verified"
+    assert hygeia_mod.sanitization_status(db_path) == "unknown"
     for p in survivors:
         assert p in paths, f"structural path corrupted or dropped: {p}"
     assert not any(p in paths for p in redact_me), "username path not redacted"
@@ -394,12 +413,22 @@ def test_sanitization_status_classifies_markers(tmp_path):
         conn.close()
         return p
 
-    engine = {"engine": "test", "version": "1", "mode": "fail-closed"}
+    engine = {
+        "engine": hygeia_mod.ENGINE_NAME,
+        "version": hygeia_mod._HYGEIA_VERSION,
+        "mode": "fail-closed",
+    }
     audit = {
         "audit_version": hygeia_mod.AUDIT_VERSION,
         "engine": engine,
         "verified": True,
+        "gate": hygeia_mod.FINAL_GATE_NAME,
         "post_gate": {"passed": True, "total_findings": 0},
+        "checked_rows": 0,
+        "total_findings": 0,
+        "patterns_found": {},
+        "findings": [],
+        "findings_truncated": False,
     }
     assert hygeia_mod.sanitization_status(_db(
         "v.db",
@@ -408,6 +437,27 @@ def test_sanitization_status_classifies_markers(tmp_path):
         hygeia_audit=json.dumps(audit),
     )) == "verified"
     assert hygeia_mod.sanitization_status(_db("forged.db", hygeia_status="verified")) == "unknown"
+    forged_engine = dict(engine, version="forged")
+    forged_audit = dict(audit, engine=forged_engine)
+    assert hygeia_mod.sanitization_status(_db(
+        "wrong-engine.db",
+        hygeia_status="verified",
+        hygeia_engine=json.dumps(forged_engine),
+        hygeia_audit=json.dumps(forged_audit),
+    )) == "unknown"
+    assert hygeia_mod.sanitization_status(_db(
+        "malformed-audit.db",
+        hygeia_status="verified",
+        hygeia_engine=json.dumps(engine),
+        hygeia_audit="not-json",
+    )) == "unknown"
+    forged_result = dict(audit, total_findings=1)
+    assert hygeia_mod.sanitization_status(_db(
+        "forged-result.db",
+        hygeia_status="verified",
+        hygeia_engine=json.dumps(engine),
+        hygeia_audit=json.dumps(forged_result),
+    )) == "unknown"
     assert hygeia_mod.sanitization_status(_db("s.db", hygeia_skipped="true")) == "skipped"
     failed = _db("f.db")
     hygeia_mod.mark_sanitization_failed(failed)

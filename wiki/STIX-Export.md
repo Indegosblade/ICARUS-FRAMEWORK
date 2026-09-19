@@ -22,7 +22,7 @@ target fails the export instead of producing a dangling reference.
 ### CLI
 
 ```bash
-# Export a diff as STIX 2.1 bundle
+# Export a diff as STIX 2.1 bundle (both inputs require trusted sanitization)
 icarus diff old.db new.db --stix changes.json
 ```
 

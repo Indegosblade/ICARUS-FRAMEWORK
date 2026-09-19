@@ -73,12 +73,24 @@ def _query_args(db, **over):
 
 def _mark_verified(db):
     """Seed trusted sanitizer evidence for consumer-policy tests."""
-    engine = {"engine": "test", "version": "1", "mode": "fail-closed"}
+    from icarus.integrations import hygeia as hygeia_mod
+
+    engine = {
+        "engine": hygeia_mod.ENGINE_NAME,
+        "version": hygeia_mod._HYGEIA_VERSION,
+        "mode": "fail-closed",
+    }
     audit = {
-        "audit_version": 1,
+        "audit_version": hygeia_mod.AUDIT_VERSION,
         "engine": engine,
         "verified": True,
+        "gate": hygeia_mod.FINAL_GATE_NAME,
         "post_gate": {"passed": True, "total_findings": 0},
+        "checked_rows": 0,
+        "total_findings": 0,
+        "patterns_found": {},
+        "findings": [],
+        "findings_truncated": False,
     }
     conn = sqlite3.connect(str(db))
     try:
