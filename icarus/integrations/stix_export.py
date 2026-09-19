@@ -427,10 +427,13 @@ def _diff_note(
     seed_parts: list,
     content: str,
     timestamp: str,
+    changed_fields: Optional[List[dict]] = None,
 ) -> dict:
     """Create a complete STIX Note for one ICARUS diff result."""
-    seed = json.dumps([category, table, *seed_parts], separators=(",", ":"))
-    return {
+    seed = json.dumps(
+        [category, table, *seed_parts], sort_keys=True, separators=(",", ":")
+    )
+    note = {
         "type": "note",
         "id": _stix_id("note", seed),
         "spec_version": "2.1",
@@ -441,6 +444,52 @@ def _diff_note(
         "x_icarus_diff_category": category,
         "x_icarus_diff_table": table,
     }
+    if changed_fields is not None:
+        note["x_icarus_diff_changed_fields"] = changed_fields
+    return note
+
+
+def _change_fields(item: dict, category: str, table: str) -> List[dict]:
+    """Validate and normalize the differ's changed-fields contract for STIX."""
+    from icarus.core.differ import changed_field_values
+
+    try:
+        fields = changed_field_values(item)
+    except ValueError as exc:
+        raise ValueError(
+            f"Malformed {category} diff record for {table}: {exc}"
+        ) from exc
+
+    try:
+        json.dumps(fields, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Malformed {category} diff record for {table}: "
+            "changed field values must be JSON serializable"
+        ) from exc
+    return fields
+
+
+def _change_content(category: str, table: str, item_key: object, fields: List[dict]) -> str:
+    """Render validated change fields without losing their labels or values."""
+    from icarus.core.differ import canonical_diff_value
+
+    details = "; ".join(
+        f"{field['field']}: {canonical_diff_value(field['old_value'])} -> "
+        f"{canonical_diff_value(field['new_value'])}"
+        for field in fields
+    )
+    return f"{category.capitalize()} in {table}: {item_key} ({details})"
+
+
+def _diff_item_key(item: dict, key_column: str, category: str, table: str) -> object:
+    """Return a diff record identity, rejecting records that cannot be traced."""
+    if key_column not in item:
+        raise ValueError(
+            f"Malformed {category} diff record for {table}: "
+            f"missing key column {key_column!r}"
+        )
+    return item[key_column]
 
 
 def diff_to_stix(
@@ -471,7 +520,7 @@ def diff_to_stix(
             key_column = diff_result.key_column
 
             for item in diff_result.added:
-                item_key = item.get(key_column, "?")
+                item_key = _diff_item_key(item, key_column, "addition", key)
                 _append_unique(
                     objects,
                     objects_by_id,
@@ -485,7 +534,7 @@ def diff_to_stix(
                 )
 
             for item in diff_result.removed:
-                item_key = item.get(key_column, "?")
+                item_key = _diff_item_key(item, key_column, "deletion", key)
                 _append_unique(
                     objects,
                     objects_by_id,
@@ -499,36 +548,40 @@ def diff_to_stix(
                 )
 
             for item in diff_result.changed:
-                item_key = item.get(key_column, "?")
-                old_value = item.get("old_value", "?")
-                new_value = item.get("new_value", "?")
+                item_key = _diff_item_key(item, key_column, "property_change", key)
+                changed_fields = _change_fields(item, "property_change", key)
                 _append_unique(
                     objects,
                     objects_by_id,
                     _diff_note(
                         "property_change",
                         key,
-                        [item_key, old_value, new_value],
-                        f"Changed in {key}: {item_key} ({old_value} -> {new_value})",
+                        [item_key, changed_fields],
+                        _change_content("changed", key, item_key, changed_fields),
                         timestamp,
+                        changed_fields,
                     ),
                 )
 
             for item in diff_result.structural:
-                item_key = item.get(key_column, "?")
-                change_type = item.get("type", "")
-                content = item.get(
-                    "description", f"Structural change in {key}: {item_key}"
-                )
+                item_key = _diff_item_key(item, key_column, "structural", key)
+                change_type = item.get("type")
+                if not isinstance(change_type, str) or not change_type:
+                    raise ValueError(
+                        f"Malformed structural diff record for {key}: "
+                        "missing non-empty change type"
+                    )
+                changed_fields = _change_fields(item, "structural", key)
                 _append_unique(
                     objects,
                     objects_by_id,
                     _diff_note(
                         "structural",
                         key,
-                        [change_type, item_key, content],
-                        content,
+                        [change_type, item_key, changed_fields],
+                        _change_content("structural change", key, item_key, changed_fields),
                         timestamp,
+                        changed_fields,
                     ),
                 )
 

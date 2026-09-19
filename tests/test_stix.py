@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from icarus import __main__ as cli
+from icarus.core.differ import DiffResult, canonical_diff_value
 from icarus.core.schema import initialize_database
 from icarus.integrations.stix_export import (
     SanitizationTrustError,
@@ -550,6 +551,131 @@ def test_stix_diff_export():
         out.unlink(missing_ok=True)
 
 
+def test_stix_diff_change_notes_preserve_the_changed_fields_contract(
+    monkeypatch, tmp_path,
+):
+    """Every current changed category exports the differ's actual values."""
+    results = {
+        "files_changed": DiffResult(
+            added=[], removed=[], table="files", key_column="path",
+            changed=[{
+                "path": "/same", "changed_fields": ["sha256"],
+                "old_sha256": "aaaa", "new_sha256": "bbbb",
+            }],
+        ),
+        "observations": DiffResult(
+            added=[], removed=[], table="observations", key_column="entity_key",
+            changed=[{
+                "entity_key": "/subject",
+                "changed_fields": ["properties", "observer"],
+                "old_properties": {"decision": False, "items": [None, "old"]},
+                "new_properties": {"decision": True, "items": [None, "new"]},
+                "old_observer": None,
+                "new_observer": "sensor-a",
+            }],
+        ),
+        "resolution": DiffResult(
+            added=[], removed=[], table="bags", key_column="canonical_key",
+            changed=[{
+                "canonical_key": "bag.common",
+                "changed_fields": ["atom_count", "score"],
+                "old_atom_count": 2, "new_atom_count": 3,
+                "old_score": 0.1, "new_score": 0.9,
+            }],
+        ),
+        "structural": DiffResult(
+            added=[], removed=[], changed=[], table="cross_table", key_column="entity",
+            structural=[{
+                "type": "binary_file_moved", "entity": "tool",
+                "changed_fields": ["file_path"],
+                "old_file_path": "/old/tool", "new_file_path": "/new/tool",
+            }],
+        ),
+    }
+
+    class FakeDiffer:
+        def __init__(self, *_args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def full_diff(self):
+            return results
+
+    monkeypatch.setattr("icarus.core.differ.IcarusDiffer", FakeDiffer)
+    bundle = diff_to_stix(
+        tmp_path / "old.db",
+        tmp_path / "new.db",
+        tmp_path / "diff.json",
+        allow_unverified=True,
+    )
+    notes = {
+        (note["x_icarus_diff_category"], note["x_icarus_diff_table"]): note
+        for note in bundle["objects"] if note["type"] == "note"
+    }
+    expected = {
+        ("property_change", "files_changed"): [{
+            "field": "sha256", "old_value": "aaaa", "new_value": "bbbb",
+        }],
+        ("property_change", "observations"): [{
+            "field": "properties",
+            "old_value": {"decision": False, "items": [None, "old"]},
+            "new_value": {"decision": True, "items": [None, "new"]},
+        }, {
+            "field": "observer", "old_value": None, "new_value": "sensor-a",
+        }],
+        ("property_change", "resolution"): [
+            {"field": "atom_count", "old_value": 2, "new_value": 3},
+            {"field": "score", "old_value": 0.1, "new_value": 0.9},
+        ],
+        ("structural", "structural"): [{
+            "field": "file_path", "old_value": "/old/tool", "new_value": "/new/tool",
+        }],
+    }
+    assert set(notes) == set(expected)
+    for key, changed_fields in expected.items():
+        note = notes[key]
+        assert note["x_icarus_diff_changed_fields"] == changed_fields
+        assert "? -> ?" not in note["content"]
+        for field in changed_fields:
+            assert f"{field['field']}:" in note["content"]
+            assert canonical_diff_value(field["old_value"]) in note["content"]
+            assert canonical_diff_value(field["new_value"]) in note["content"]
+
+
+def test_stix_diff_rejects_a_change_without_structured_fields(monkeypatch, tmp_path):
+    class FakeDiffer:
+        def __init__(self, *_args):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def full_diff(self):
+            return {
+                "files_changed": DiffResult(
+                    added=[], removed=[], table="files", key_column="path",
+                    changed=[{"path": "/same", "old_value": "old", "new_value": "new"}],
+                ),
+            }
+
+    monkeypatch.setattr("icarus.core.differ.IcarusDiffer", FakeDiffer)
+    with pytest.raises(ValueError, match="changed_fields"):
+        diff_to_stix(
+            tmp_path / "old.db",
+            tmp_path / "new.db",
+            tmp_path / "diff.json",
+            allow_unverified=True,
+        )
+
+
 def test_stix_diff_export_includes_structural_change():
     """Finding #58/#163: diff_to_stix must not silently drop structural changes."""
     db_old = _build_db()
@@ -611,6 +737,11 @@ def test_stix_diff_export_includes_structural_change():
         assert len(structural_notes) == 1
         assert "zzz_structural_probe.exe" in structural_notes[0]["content"]
         assert structural_notes[0]["x_icarus_diff_table"] == "structural"
+        assert structural_notes[0]["x_icarus_diff_changed_fields"] == [{
+            "field": "file_path",
+            "old_value": "/synthetic/old/zzz_structural_probe.exe",
+            "new_value": "/synthetic/new/zzz_structural_probe.exe",
+        }]
     finally:
         db_old.unlink(missing_ok=True)
         db_new.unlink(missing_ok=True)

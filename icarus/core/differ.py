@@ -51,7 +51,7 @@ def _md_sanitize(value: Any) -> str:
     does not work inside a Markdown code span — a raw backtick would still close
     the span — so the character itself must never survive.
     """
-    text = "?" if value is None else str(value)
+    text = "null" if value is None else str(value)
     text = text.replace("\\", "\\\\")          # 1. escape literal backslashes
     text = text.replace("`", "\\x60")          # 2. defuse code-span-closing backticks
     text = text.replace("|", "\\|")            # 3. escape table-cell pipes
@@ -59,6 +59,57 @@ def _md_sanitize(value: Any) -> str:
         lambda m: f"\\x{ord(m.group()):02x}", text
     )
     return text
+
+
+def canonical_diff_value(value: Any) -> str:
+    """Render a valid diff value as compact, type-preserving JSON text.
+
+    This shared representation keeps text consumers aligned with the typed JSON
+    diff: ``None`` is ``null``, booleans stay lowercase, strings stay quoted,
+    and collections are sorted deterministically. Boundary-specific renderers
+    may then escape this text without replacing a valid value with a placeholder.
+    """
+    try:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("changed field values must be JSON serializable") from exc
+
+
+def changed_field_values(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return one labeled old/new value for every declared changed field.
+
+    Changed records use the contract introduced for mutable observations:
+    ``changed_fields`` lists field names, and every name has matching
+    ``old_<field>`` and ``new_<field>`` values. Consumers must reject a record
+    that does not meet that contract instead of inventing placeholder values.
+    """
+    field_names = item.get("changed_fields")
+    if not isinstance(field_names, list) or not field_names:
+        raise ValueError("expected a non-empty changed_fields list")
+
+    fields = []
+    seen = set()
+    for field_name in field_names:
+        if not isinstance(field_name, str) or not field_name:
+            raise ValueError("changed_fields entries must be non-empty strings")
+        if field_name in seen:
+            raise ValueError("changed_fields entries must be unique")
+        seen.add(field_name)
+        old_name = f"old_{field_name}"
+        new_name = f"new_{field_name}"
+        if old_name not in item or new_name not in item:
+            raise ValueError(
+                f"{field_name!r} requires {old_name!r} and {new_name!r}"
+            )
+        fields.append({
+            "field": field_name,
+            "old_value": item[old_name],
+            "new_value": item[new_name],
+        })
+    return fields
 
 
 class DiffCategory(enum.Enum):
@@ -102,16 +153,13 @@ class DiffResult:
             for item in self.changed[:DIFF_DISPLAY_LIMIT]:
                 label = f"- `{_md_sanitize(item.get(self.key_column, '?'))}`"
                 details = []
-                for field_name in item.get("changed_fields", []):
-                    old_value = item.get(f"old_{field_name}")
-                    new_value = item.get(f"new_{field_name}")
-                    if isinstance(old_value, (dict, list)):
-                        old_value = json.dumps(old_value, sort_keys=True, separators=(",", ":"))
-                    if isinstance(new_value, (dict, list)):
-                        new_value = json.dumps(new_value, sort_keys=True, separators=(",", ":"))
+                for change in changed_field_values(item):
+                    field_name = change["field"]
+                    old_value = change["old_value"]
+                    new_value = change["new_value"]
                     details.append(
-                        f"{field_name}: {_md_sanitize(old_value)} -> "
-                        f"{_md_sanitize(new_value)}"
+                        f"{field_name}: {_md_sanitize(canonical_diff_value(old_value))} -> "
+                        f"{_md_sanitize(canonical_diff_value(new_value))}"
                     )
                 if details:
                     label += f" ({'; '.join(details)})"
@@ -205,10 +253,18 @@ class IcarusDiffer:
             f"WHERE n.[{compare}] IS NOT o.[{compare}]"
         ).fetchall()
 
+        changed = []
+        for row in rows:
+            item = dict(row)
+            item["changed_fields"] = [compare]
+            item[f"old_{compare}"] = item["old_value"]
+            item[f"new_{compare}"] = item["new_value"]
+            changed.append(item)
+
         return DiffResult(
             added=[],
             removed=[],
-            changed=[dict(r) for r in rows],
+            changed=changed,
             table=table,
             key_column=key
         )
@@ -302,6 +358,9 @@ class IcarusDiffer:
                 "entity": r.get("executable_name"),
                 "old_value": r.get("old_path"),
                 "new_value": r.get("new_path"),
+                "changed_fields": ["file_path"],
+                "old_file_path": r.get("old_path"),
+                "new_file_path": r.get("new_path"),
                 "description": f"binary '{r.get('executable_name')}' file: "
                                f"{r.get('old_path')} -> {r.get('new_path')}",
             })
@@ -333,6 +392,9 @@ class IcarusDiffer:
                 "entity": f"{r.get('operation')}:{r.get('action')}",
                 "old_value": r.get("old_profile"),
                 "new_value": r.get("new_profile"),
+                "changed_fields": ["profile"],
+                "old_profile": r.get("old_profile"),
+                "new_profile": r.get("new_profile"),
                 "description": f"sandbox rule '{r.get('operation')}:{r.get('action')}' "
                                f"profile: {r.get('old_profile')} -> {r.get('new_profile')}",
             })
@@ -376,6 +438,9 @@ class IcarusDiffer:
                 "entity": r.get("key"),
                 "old_value": r.get("old_owner"),
                 "new_value": r.get("new_owner"),
+                "changed_fields": ["binary"],
+                "old_binary": r.get("old_owner"),
+                "new_binary": r.get("new_owner"),
                 "description": f"entitlement '{r.get('key')}' "
                                f"binary: {r.get('old_owner')} -> {r.get('new_owner')}",
             })
@@ -700,11 +765,13 @@ class IcarusDiffer:
             d = dict(r)
             if d["old_sha256"] is not None and d["new_sha256"] is not None:
                 d["change_basis"] = "sha256"
+                d["changed_fields"] = ["sha256"]
             else:
                 # At least one side's content is unknown (>=50 MB or symlink);
                 # the reported change is inferred from the size delta.
                 d["change_basis"] = "size"
                 d["content_unknown"] = True
+                d["changed_fields"] = ["size"]
             changed.append(d)
 
         return DiffResult(
@@ -808,14 +875,17 @@ class IcarusDiffer:
         for k in new_bags.keys() & old_bags.keys():
             n, o = new_bags[k], old_bags[k]
             if n["atom_count"] != o["atom_count"] or n["score"] != o["score"]:
-                changed.append({
+                row = {
                     "entity_type": k[0],
                     "canonical_key": k[1],
-                    "old_atom_count": o["atom_count"],
-                    "new_atom_count": n["atom_count"],
-                    "old_score": o["score"],
-                    "new_score": n["score"],
-                })
+                    "changed_fields": [],
+                }
+                for field_name in ("atom_count", "score"):
+                    if o[field_name] != n[field_name]:
+                        row["changed_fields"].append(field_name)
+                        row[f"old_{field_name}"] = o[field_name]
+                        row[f"new_{field_name}"] = n[field_name]
+                changed.append(row)
 
         return DiffResult(
             added=added, removed=removed, changed=changed,
