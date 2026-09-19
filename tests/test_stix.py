@@ -1,6 +1,7 @@
 """Tests for Phase 3.6 — STIX 2.1 export."""
 
 import json
+import random
 import re
 import sqlite3
 import tempfile
@@ -42,28 +43,31 @@ def _build_db():
 def _build_identity_fixture(
     db_path: Path,
     *,
-    filler_first: bool,
-    reverse_insert_order: bool,
+    insertion_seed: int,
+    filler_count: int,
     target_path: str = "/same/target.bin",
     target_sha256: str = "a" * 64,
 ) -> None:
-    """Build equivalent logical rows while deliberately changing SQLite IDs."""
+    """Build equivalent rows while randomizing every table's insertion order."""
     initialize_database(db_path, {"source": "identity-test"})
     conn = sqlite3.connect(str(db_path))
-    entities = ["filler", "target"] if filler_first else ["target", "filler"]
-    dependent_entities = list(entities)
-    if reverse_insert_order:
-        dependent_entities.reverse()
+    entities = ["target", *(f"filler-{index}" for index in range(filler_count))]
+    randomizer = random.Random(insertion_seed)
+
+    def shuffled():
+        result = list(entities)
+        randomizer.shuffle(result)
+        return result
 
     file_ids = {}
-    for entity in entities:
+    for entity in shuffled():
         is_target = entity == "target"
         cursor = conn.execute(
             "INSERT INTO files (path, filename, sha256, file_type, observed_time) "
             "VALUES (?, ?, ?, ?, ?)",
             (
-                target_path if is_target else "/unrelated/filler.bin",
-                "target.bin" if is_target else "filler.bin",
+                target_path if is_target else f"/unrelated/{entity}.bin",
+                "target.bin" if is_target else f"{entity}.bin",
                 target_sha256 if is_target else "b" * 64,
                 "binary",
                 "2026-07-18T12:34:56Z",
@@ -72,7 +76,7 @@ def _build_identity_fixture(
         file_ids[entity] = cursor.lastrowid
 
     binary_ids = {}
-    for entity in dependent_entities:
+    for entity in shuffled():
         cursor = conn.execute(
             "INSERT INTO binaries "
             "(file_id, bundle_id, executable_name, arch, observed_time) "
@@ -88,7 +92,7 @@ def _build_identity_fixture(
         binary_ids[entity] = cursor.lastrowid
 
     daemon_ids = {}
-    for entity in dependent_entities:
+    for entity in shuffled():
         cursor = conn.execute(
             "INSERT INTO daemons (label, plist_path, program, observed_time) "
             "VALUES (?, ?, ?, ?)",
@@ -102,7 +106,7 @@ def _build_identity_fixture(
         daemon_ids[entity] = cursor.lastrowid
 
     entitlement_ids = {}
-    for entity in dependent_entities:
+    for entity in shuffled():
         cursor = conn.execute(
             "INSERT INTO entitlements (binary_id, key, value, observed_time) "
             "VALUES (?, ?, ?, ?)",
@@ -120,10 +124,12 @@ def _build_identity_fixture(
         ("binaries", binary_ids["target"], "target-binary-seen"),
         ("daemons", daemon_ids["target"], "target-daemon-seen"),
         ("entitlements", entitlement_ids["target"], "target-entitlement-seen"),
-        ("files", file_ids["filler"], "filler-seen"),
     ]
-    if reverse_insert_order:
-        observations.reverse()
+    observations.extend(
+        ("files", file_ids[entity], f"{entity}-seen")
+        for entity in entities if entity != "target"
+    )
+    randomizer.shuffle(observations)
     for entity_table, entity_id, event_type in observations:
         conn.execute(
             "INSERT INTO observations (entity_table, entity_id, observed_at, event_type) "
@@ -154,49 +160,46 @@ def _target_stix_ids(bundle: dict) -> dict:
     return ids
 
 
-@pytest.mark.parametrize(
-    "filler_first,reverse_insert_order",
-    [(a, b) for a in (False, True) for b in (False, True)],
-)
-def test_stix_identity_is_stable_across_rebuild_order_and_unrelated_rows(
-    tmp_path, filler_first, reverse_insert_order
-):
-    """#90: stable IDs and refs survive row-ID permutations and unrelated rows."""
+def test_stix_identity_is_stable_across_randomized_rebuild_order_and_unrelated_rows(tmp_path):
+    """#90: stable IDs and refs survive deterministic randomized row-ID permutations."""
     baseline_db = tmp_path / "baseline.db"
-    variant_db = tmp_path / "variant.db"
-    _build_identity_fixture(baseline_db, filler_first=False, reverse_insert_order=False)
-    _build_identity_fixture(
-        variant_db,
-        filler_first=filler_first,
-        reverse_insert_order=reverse_insert_order,
-        target_path=r"\same\target.bin",
-        target_sha256="A" * 64,
-    )
+    _build_identity_fixture(baseline_db, insertion_seed=0, filler_count=0)
     baseline = export_to_stix(baseline_db, tmp_path / "baseline.json")
-    variant = export_to_stix(variant_db, tmp_path / "variant.json")
-
     baseline_ids = _target_stix_ids(baseline)
-    variant_ids = _target_stix_ids(variant)
-    assert variant_ids == baseline_ids
 
-    objects = {obj["id"]: obj for obj in variant["objects"]}
-    assert objects[variant_ids["target-file-seen"]]["object_refs"] == [variant_ids["file"]]
-    assert objects[variant_ids["target-binary-seen"]]["object_refs"] == [variant_ids["binary"]]
-    assert objects[variant_ids["target-daemon-seen"]]["sighting_of_ref"] == variant_ids["daemon"]
-    assert (
-        objects[variant_ids["target-entitlement-seen"]]["sighting_of_ref"]
-        == variant_ids["entitlement"]
-    )
+    for seed in range(1, 17):
+        variant_db = tmp_path / f"variant-{seed}.db"
+        _build_identity_fixture(
+            variant_db,
+            insertion_seed=seed,
+            filler_count=seed % 5 + 1,
+            target_sha256="A" * 64,
+        )
+        variant = export_to_stix(variant_db, tmp_path / f"variant-{seed}.json")
+        variant_ids = _target_stix_ids(variant)
+        assert variant_ids == baseline_ids
+
+        objects = {obj["id"]: obj for obj in variant["objects"]}
+        assert objects[variant_ids["target-file-seen"]]["object_refs"] == [variant_ids["file"]]
+        assert objects[variant_ids["target-binary-seen"]]["object_refs"] == [variant_ids["binary"]]
+        assert (
+            objects[variant_ids["target-daemon-seen"]]["sighting_of_ref"]
+            == variant_ids["daemon"]
+        )
+        assert (
+            objects[variant_ids["target-entitlement-seen"]]["sighting_of_ref"]
+            == variant_ids["entitlement"]
+        )
 
 
 def test_stix_identity_changes_when_a_material_domain_attribute_changes(tmp_path):
     original_db = tmp_path / "original.db"
     changed_db = tmp_path / "changed.db"
-    _build_identity_fixture(original_db, filler_first=False, reverse_insert_order=False)
+    _build_identity_fixture(original_db, insertion_seed=0, filler_count=0)
     _build_identity_fixture(
         changed_db,
-        filler_first=True,
-        reverse_insert_order=True,
+        insertion_seed=1,
+        filler_count=2,
         target_path="/same/renamed-target.bin",
     )
 
@@ -204,6 +207,70 @@ def test_stix_identity_changes_when_a_material_domain_attribute_changes(tmp_path
     changed_ids = _target_stix_ids(export_to_stix(changed_db, tmp_path / "changed.json"))
     for key in ("file", "binary", "entitlement", "target-file-seen", "target-binary-seen"):
         assert changed_ids[key] != original_ids[key]
+
+
+def test_stix_preserves_distinct_raw_paths_without_hashes(tmp_path):
+    """Path normalization must not collapse valid, differently-valued rows."""
+    db = tmp_path / "paths.db"
+    initialize_database(db)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT INTO files (path, filename, size, file_type) VALUES (?, ?, ?, ?)",
+            [
+                ("/tmp/../same", "same", 1, "data"),
+                ("/same", "same", 2, "data"),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    bundle = export_to_stix(db, tmp_path / "paths.json", include_tables=["files"])
+    files = [obj for obj in bundle["objects"] if obj["type"] == "file"]
+    assert {obj["size"] for obj in files} == {1, 2}
+    assert len({obj["id"] for obj in files}) == 2
+
+
+def test_stix_entitlement_values_have_distinct_ids_and_observation_references(tmp_path):
+    """A schema-valid same-key entitlement pair must not collide in STIX."""
+    db = tmp_path / "entitlements.db"
+    initialize_database(db)
+    conn = sqlite3.connect(str(db))
+    try:
+        file_id = conn.execute(
+            "INSERT INTO files (path, filename) VALUES (?, ?)",
+            ("/same/tool", "tool"),
+        ).lastrowid
+        binary_id = conn.execute(
+            "INSERT INTO binaries (file_id, executable_name) VALUES (?, ?)",
+            (file_id, "tool"),
+        ).lastrowid
+        entitlement_ids = []
+        for value in ("true", "false"):
+            entitlement_ids.append(
+                conn.execute(
+                    "INSERT INTO entitlements (binary_id, key, value, observed_time) "
+                    "VALUES (?, ?, ?, ?)",
+                    (binary_id, "com.example.flag", value, "2026-07-18T12:34:56Z"),
+                ).lastrowid
+            )
+        for entitlement_id in entitlement_ids:
+            conn.execute(
+                "INSERT INTO observations (entity_table, entity_id, observed_at, event_type) "
+                "VALUES (?, ?, ?, ?)",
+                ("entitlements", entitlement_id, "2026-07-18T12:34:56Z", "entitlement-seen"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    bundle = export_to_stix(db, tmp_path / "entitlements.json", include_tables=["observations"])
+    entitlements = [obj for obj in bundle["objects"] if obj["type"] == "course-of-action"]
+    sightings = [obj for obj in bundle["objects"] if obj["type"] == "sighting"]
+    assert {obj["description"] for obj in entitlements} == {"true", "false"}
+    assert len({obj["id"] for obj in entitlements}) == 2
+    assert {obj["sighting_of_ref"] for obj in sightings} == {obj["id"] for obj in entitlements}
 
 
 def test_stix_export_produces_bundle():

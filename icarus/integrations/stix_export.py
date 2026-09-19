@@ -1,9 +1,7 @@
 """ICARUS STIX 2.1 Export — transform ICARUS entities to STIX 2.1 bundles."""
 
 import json
-import posixpath
 import sqlite3
-import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +10,7 @@ from typing import List, Optional
 # This namespace is owned by ICARUS.  Do not change it: identity-policy
 # versions, rather than a new namespace, distinguish future formats.
 _ICARUS_STIX_NAMESPACE = uuid.UUID("28ad9e40-63a7-4de4-a1f0-20f7f1f3cd10")
-_ICARUS_STIX_IDENTITY_POLICY = "icarus-stix-identity-v1"
+_ICARUS_STIX_IDENTITY_POLICY = "icarus-stix-identity-v2"
 
 
 def _stix_id(prefix: str, seed: str) -> str:
@@ -62,18 +60,17 @@ _ENTITY_TABLE_STIX_TYPE = {
 _SCO_ENTITY_TABLES = {"files", "binaries"}
 
 
-def _canonical_path(value: str) -> str:
-    """Normalize a stored path without applying filesystem-specific case rules."""
-    return posixpath.normpath(unicodedata.normalize("NFC", value).replace("\\", "/"))
-
-
 def _canonical_string(value: object) -> str:
-    """Return the Unicode-normalized representation used by identity keys."""
-    return unicodedata.normalize("NFC", str(value))
+    """Preserve a SQLite text value while canonical JSON serializes its structure.
+
+    Paths and other identity attributes are opaque database values: SQLite can
+    validly store distinct strings which a filesystem normalizer would merge.
+    """
+    return str(value)
 
 
 def _file_identity_attributes(path: object, sha256: object) -> dict:
-    attributes = {"path": _canonical_path(str(path))}
+    attributes = {"path": _canonical_string(path)}
     if sha256:
         attributes["sha256"] = _canonical_string(sha256).strip().lower()
     return attributes
@@ -99,7 +96,7 @@ def _binary_identity_attributes(
 
 
 def _entity_identity_attributes(entity_table: str, row: dict) -> dict:
-    """Return the v1 stable-domain identity attributes for an exported entity."""
+    """Return the v2 stable-domain identity attributes for an exported entity."""
     if entity_table == "files":
         return _file_identity_attributes(row["path"], row.get("sha256"))
     if entity_table == "binaries":
@@ -113,7 +110,7 @@ def _entity_identity_attributes(entity_table: str, row: dict) -> dict:
     if entity_table == "daemons":
         return {
             "label": _canonical_string(row["label"]),
-            "plist_path": _canonical_path(str(row["plist_path"])),
+            "plist_path": _canonical_string(row["plist_path"]),
         }
     if entity_table == "entitlements":
         return {
@@ -125,6 +122,7 @@ def _entity_identity_attributes(entity_table: str, row: dict) -> dict:
                 row.get("_icarus_binary_arch"),
             ),
             "key": _canonical_string(row["key"]),
+            "value": _canonical_string(row["value"]),
         }
     raise ValueError(f"Unsupported observation entity table for STIX export: {entity_table!r}")
 
