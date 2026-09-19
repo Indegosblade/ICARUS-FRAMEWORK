@@ -23,6 +23,6 @@ dependencies:
 reliability: "F"
 default_confidence: 0.30
 tests:
-  fixtures_dir: "tests/fixtures/generic_sqlite/"
+  fixtures_dir: "selftest/fixtures/generic_sqlite/"
   min_entities: 1
-  golden_output: "tests/golden/generic_sqlite.json"
+  golden_output: "selftest/golden/generic_sqlite.json"

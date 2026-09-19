@@ -1,0 +1,11 @@
+{
+  "parser_id": "windows",
+  "version": "1.0.0",
+  "entity_counts": {
+    "files": 4,
+    "binaries": 2,
+    "frameworks": 1
+  },
+  "has_relationships": false,
+  "zero_pii": true
+}

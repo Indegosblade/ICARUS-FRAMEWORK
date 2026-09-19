@@ -26,6 +26,6 @@ dependencies:
 reliability: "B"
 default_confidence: 0.90
 tests:
-  fixtures_dir: "tests/fixtures/linux/"
+  fixtures_dir: "selftest/fixtures/linux/"
   min_entities: 1
-  golden_output: "tests/golden/linux.json"
+  golden_output: "selftest/golden/linux.json"

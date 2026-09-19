@@ -145,7 +145,10 @@ Run the 4-gate test harness against a parser.
 icarus parser test PARSER_NAME
 ```
 
-Gates: golden output, idempotency, schema conformance, zero-PII.
+Gates: golden output, complete-output idempotency, schema conformance, zero-PII.
+Built-in parsers carry their compact fixtures and goldens in the installed
+package, so this command does not require a repository checkout or a particular
+current working directory.
 
 ---
 

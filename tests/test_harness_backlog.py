@@ -450,24 +450,14 @@ def test_production_parser_harness_all_pass(mod_name, cls_name, manifest_rel, fi
         assert r.passed, f"{cls_name} {r.test_name} failed: {r.message}"
 
 
-def test_generic_sqlite_harness_all_pass(tmp_path):
-    """#143: generic/sqlite's manifest declares fixtures_dir=
-    tests/fixtures/generic_sqlite/, which does not exist anywhere in the
-    repo (a pre-existing gap, not part of this fix). Build an equivalent
-    fixture inline — one .db file, matching golden_sqlite.json's declared
-    count of 1 — so the real manifest + real golden file are still
-    exercised end to end."""
+def test_generic_sqlite_harness_all_pass():
+    """#143/#96: exercise the SQLite parser's installed self-test corpus."""
     from icarus.parsers.generic.sqlite_parser import SqliteParser
-
-    src_db = tmp_path / "sample.db"
-    conn = sqlite3.connect(str(src_db))
-    conn.execute("CREATE TABLE widgets (id INTEGER PRIMARY KEY, label TEXT)")
-    conn.execute("INSERT INTO widgets VALUES (1, 'demo')")
-    conn.commit()
-    conn.close()
+    from icarus.parsers.testing import resolve_test_resource
 
     manifest = load_manifest(PARSERS_DIR / "generic" / "sqlite_parser.yaml")
-    harness = ParserTestHarness(SqliteParser(), manifest, tmp_path)
+    fixtures = resolve_test_resource(manifest.tests["fixtures_dir"])
+    harness = ParserTestHarness(SqliteParser(), manifest, fixtures)
     results = harness.run_all()
     for r in results:
         assert r.passed, f"SqliteParser {r.test_name} failed: {r.message}"

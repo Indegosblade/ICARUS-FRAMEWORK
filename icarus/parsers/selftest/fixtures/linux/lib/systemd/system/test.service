@@ -1,0 +1,4 @@
+[Unit]
+Description=Test
+[Service]
+ExecStart=/usr/bin/test_daemon

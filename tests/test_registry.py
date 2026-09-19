@@ -136,3 +136,86 @@ def test_registry_catalog_parsers_exist():
 
     devel = json.loads(devel_json.read_text())
     assert isinstance(devel, list)
+
+
+def _manifest(parser_id):
+    from icarus.parsers.manifest import ParserManifest
+
+    return ParserManifest(
+        parser_id=parser_id, version="1.0.0", spec_version="icarus-parser/1.0",
+        author="test", license="MIT", quality_tier="production",
+        description="fixture", identify={"specificity_level": 10},
+        consumes=[], produces={"entity_types": ["files"]},
+        reliability="C", default_confidence=0.5,
+    )
+
+
+def _parser_class(name, description):
+    from icarus.parsers.base import BaseParser
+
+    class FixtureParser(BaseParser):
+        @property
+        def name(self):
+            return name
+
+        @property
+        def description(self):
+            return description
+
+        def identify(self, source):
+            return True
+
+        def extract_entities(self, source, db_path):
+            return {}
+
+        def extract_relationships(self, source, db_path):
+            return {}
+
+    return FixtureParser
+
+
+def test_registry_rejects_builtin_entrypoint_collision_atomically():
+    from icarus.core.registry import ParserRegistry
+
+    registry = ParserRegistry()
+    builtin = _parser_class("collision", "built in")
+    plugin = _parser_class("collision", "plugin")
+    manifest = _manifest("collision")
+    registry.register(builtin, manifest, origin="module icarus.parsers.collision")
+
+    with pytest.raises(ValueError) as exc_info:
+        registry.register(plugin, None, origin="entry point example:collision")
+
+    message = str(exc_info.value)
+    assert "module icarus.parsers.collision" in message
+    assert "entry point example:collision" in message
+    assert registry.get("collision").description == "built in"
+    assert registry.get_manifest("collision") is manifest
+
+
+def test_registry_rejects_duplicate_manifestless_parsers():
+    from icarus.core.registry import ParserRegistry
+
+    registry = ParserRegistry()
+    first = _parser_class("duplicate", "first")
+    second = _parser_class("duplicate", "second")
+    registry.register(first, origin="module first")
+
+    with pytest.raises(ValueError, match="module first.*module second"):
+        registry.register(second, origin="module second")
+
+    assert registry.get("duplicate").description == "first"
+    assert registry.get_manifest("duplicate") is None
+
+
+def test_registry_rejects_manifest_parser_id_mismatch_without_mutating_state():
+    from icarus.core.registry import ParserRegistry
+
+    registry = ParserRegistry()
+    parser = _parser_class("implementation-name", "fixture")
+
+    with pytest.raises(ValueError, match="implementation-name.*manifest-name"):
+        registry.register(parser, _manifest("manifest-name"), origin="module mismatch")
+
+    with pytest.raises(ValueError, match="Unknown parser"):
+        registry.get("implementation-name")

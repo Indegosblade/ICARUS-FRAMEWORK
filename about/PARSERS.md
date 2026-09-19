@@ -88,9 +88,12 @@ reliability: "B"                  # A-F Admiralty grade
 default_confidence: 0.85          # 0.0-1.0
 
 tests:
-  fixtures_dir: "tests/fixtures/my_parser"
-  golden_output: "tests/golden/my_parser.json"
+  fixtures_dir: "selftest/fixtures/my_parser"
+  golden_output: "selftest/golden/my_parser.json"
 ```
+
+Built-in test resources live below `icarus/parsers/selftest/` and are included
+as package data, so the same gates run from source and from an installed wheel.
 
 Validate a manifest:
 ```bash
@@ -236,8 +239,8 @@ Discovery and manifest-load failures are logged (module or manifest name plus th
 icarus parser test my_parser
 ```
 
-1. **Golden output** — entity counts match baseline (tests/golden/my_parser.json)
-2. **Idempotency** — second run over same data adds zero entities
+1. **Golden output** — entity counts match the packaged baseline
+2. **Idempotency** — a second complete entity + relationship run leaves all parser output unchanged
 3. **Schema conformance** — parser only writes to tables it declares in manifest
 4. **Zero-PII** — HYGEIA verify_clean passes on output
 

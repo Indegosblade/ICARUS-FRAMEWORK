@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import tempfile
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
@@ -11,6 +12,20 @@ from typing import List
 from icarus.core.schema import open_db
 from icarus.parsers.base import BaseParser
 from icarus.parsers.manifest import ParserManifest
+
+
+def resolve_test_resource(reference: str) -> Path:
+    """Resolve a manifest test resource from the installed parser package.
+
+    Absolute paths remain supported for third-party/development manifests.
+    Built-in manifests use package-relative ``selftest/...`` references, so
+    ``icarus parser test`` never depends on the current working directory or
+    on a source checkout containing ``tests/``.
+    """
+    path = Path(reference)
+    if path.is_absolute():
+        return path
+    return Path(__file__).parent / path
 
 
 @dataclass
@@ -23,6 +38,13 @@ class HarnessResult:
 
 class ParserTestHarness:
     """Four mandatory tests for parser production tier."""
+
+    # initialize_database() owns these bookkeeping tables. They describe the
+    # harness/run rather than parser output, so they are intentionally outside
+    # the idempotency contract. SQLite's FTS virtual tables and shadow tables
+    # are also excluded as derived indexes; their source entity tables remain
+    # in the snapshot.
+    _IDEMPOTENCY_METADATA_TABLES = {"metadata", "versions", "sqlite_sequence"}
 
     def __init__(self, parser: BaseParser, manifest: ParserManifest, fixtures_dir: Path):
         if not fixtures_dir.exists():
@@ -44,7 +66,7 @@ class ParserTestHarness:
 
         golden_file = Path(golden_path)
         if not golden_file.is_absolute():
-            golden_file = Path(__file__).parent.parent.parent / golden_path
+            golden_file = resolve_test_resource(golden_path)
         if not golden_file.exists():
             return HarnessResult("golden_output", False, f"Golden file not found: {golden_file}")
 
@@ -209,45 +231,107 @@ class ParserTestHarness:
             db_path.unlink(missing_ok=True)
 
     def test_idempotency(self) -> HarnessResult:
-        """Run parser twice on same fixture, second run should add 0 new rows."""
+        """Run both parser phases twice and compare their complete output."""
         db_path = self._run_parser()
         try:
             conn = open_db(db_path)
             try:
-                counts_first = {}
-                for table in self.manifest.entity_types:
-                    try:
-                        counts_first[table] = conn.execute(
-                            f"SELECT COUNT(*) FROM {table}"  # nosec B608 - table iterates manifest.entity_types, a dev-authored in-repo YAML field, not external input
-                        ).fetchone()[0]
-                    except sqlite3.OperationalError:
-                        counts_first[table] = 0
+                before = self._output_snapshot(conn)
             finally:
                 conn.close()
 
             self.parser.extract_entities(self.fixtures_dir, db_path)
+            self.parser.extract_relationships(self.fixtures_dir, db_path)
 
             conn = open_db(db_path)
             try:
-                counts_second = {}
-                for table in self.manifest.entity_types:
-                    try:
-                        counts_second[table] = conn.execute(
-                            f"SELECT COUNT(*) FROM {table}"  # nosec B608 - table iterates manifest.entity_types, a dev-authored in-repo YAML field, not external input
-                        ).fetchone()[0]
-                    except sqlite3.OperationalError:
-                        counts_second[table] = 0
+                after = self._output_snapshot(conn)
             finally:
                 conn.close()
 
-            if counts_first == counts_second:
-                return HarnessResult("idempotency", True, "Second run added 0 entities")
+            changed = sorted(
+                table
+                for table in before.keys() | after.keys()
+                if before.get(table, []) != after.get(table, [])
+            )
+            if not changed:
+                return HarnessResult(
+                    "idempotency", True, "Second complete parser run produced no changes"
+                )
+
+            evidence = {
+                table: self._snapshot_difference(before.get(table, []), after.get(table, []))
+                for table in changed
+            }
+            summary = ", ".join(
+                f"{table} ({len(before.get(table, []))} -> "
+                f"{len(after.get(table, []))} rows)"
+                for table in changed
+            )
             return HarnessResult(
                 "idempotency", False,
-                f"Counts changed: {counts_first} -> {counts_second}",
+                f"Output changed in tables: {summary}",
+                {"changed_tables": evidence},
             )
         finally:
             db_path.unlink(missing_ok=True)
+
+    @classmethod
+    def _output_snapshot(cls, conn: sqlite3.Connection) -> dict:
+        """Return canonical, row-order-independent parser output by table."""
+        tables = conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name"
+        ).fetchall()
+        snapshot = {}
+        for table, create_sql in tables:
+            if table in cls._IDEMPOTENCY_METADATA_TABLES:
+                continue
+            if table.endswith("_fts") or "_fts_" in table:
+                continue
+            if create_sql and create_sql.lstrip().upper().startswith("CREATE VIRTUAL TABLE"):
+                continue
+            quoted = '"' + table.replace('"', '""') + '"'
+            rows = conn.execute(
+                f"SELECT * FROM {quoted}"  # nosec B608 - identifier comes from sqlite_master
+            ).fetchall()
+            canonical_rows = [cls._canonical_row(row) for row in rows]
+            snapshot[table] = sorted(canonical_rows)
+        return snapshot
+
+    @staticmethod
+    def _canonical_row(row: tuple) -> str:
+        """Serialize SQLite values deterministically, including JSON objects."""
+        values = []
+        for value in row:
+            if isinstance(value, bytes):
+                values.append({"type": "bytes", "value": value.hex()})
+            elif isinstance(value, str):
+                normalized = value
+                if value.lstrip().startswith(("{", "[")):
+                    try:
+                        normalized = json.dumps(
+                            json.loads(value), sort_keys=True, separators=(",", ":")
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                values.append({"type": "text", "value": normalized})
+            else:
+                values.append({"type": type(value).__name__, "value": value})
+        return json.dumps(values, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
+    def _snapshot_difference(before: List[str], after: List[str]) -> dict:
+        """Summarize a changed table with bounded before/after row evidence."""
+        removed = list((Counter(before) - Counter(after)).elements())
+        added = list((Counter(after) - Counter(before)).elements())
+        return {
+            "before_count": len(before),
+            "after_count": len(after),
+            "before_sha256": hashlib.sha256("\n".join(before).encode()).hexdigest(),
+            "after_sha256": hashlib.sha256("\n".join(after).encode()).hexdigest(),
+            "removed_rows": removed[:3],
+            "added_rows": added[:3],
+        }
 
     def test_zero_pii(self) -> HarnessResult:
         """Run HYGEIA verify_clean() on output — must return passed: True."""

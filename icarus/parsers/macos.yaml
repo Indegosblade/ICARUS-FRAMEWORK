@@ -34,6 +34,6 @@ dependencies:
 reliability: "B"
 default_confidence: 0.9
 tests:
-  fixtures_dir: "tests/fixtures/macos/"
+  fixtures_dir: "selftest/fixtures/macos/"
   min_entities: 1
-  golden_output: "tests/golden/macos.json"
+  golden_output: "selftest/golden/macos.json"

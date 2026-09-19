@@ -1,0 +1,13 @@
+{
+  "parser_id": "macos",
+  "entity_counts": {
+    "files": 10,
+    "binaries": 0,
+    "daemons": 3,
+    "mach_services": 3,
+    "entitlements": 0,
+    "kexts": 2,
+    "frameworks": 2,
+    "sandbox_profiles": 2
+  }
+}

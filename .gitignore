@@ -3,6 +3,8 @@
 *.db-wal
 *.db-shm
 *.db-journal
+# Deliberately tiny, synthetic package fixture (no extracted/user data).
+!icarus/parsers/selftest/fixtures/generic_sqlite/sample.db
 
 # Python
 __pycache__/
