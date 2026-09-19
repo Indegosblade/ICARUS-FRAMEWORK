@@ -15,6 +15,8 @@ Three gaps closed here:
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from icarus.core.differ import DiffCategory, DiffResult, IcarusDiffer, _md_sanitize
 from icarus.core.schema import initialize_database
 
@@ -165,7 +167,12 @@ def test_full_diff_covers_every_documented_category(tmp_path):
 
     # PROPERTY_CHANGE: /change/c changed its sha256.
     assert res["files_changed"].category == DiffCategory.PROPERTY_CHANGE
-    assert any(r["path"] == "/change/c" for r in res["files_changed"].changed)
+    file_change = next(
+        r for r in res["files_changed"].changed if r["path"] == "/change/c"
+    )
+    assert file_change["changed_fields"] == ["sha256"]
+    assert file_change["old_sha256"] == "old"
+    assert file_change["new_sha256"] == "new"
 
     # observation_diff() is wired: the extra 'exec' observation is reported.
     assert any(r.get("event_type") == "exec" for r in res["observations"].added)
@@ -173,7 +180,12 @@ def test_full_diff_covers_every_documented_category(tmp_path):
     # RESOLUTION_CHANGE: bag.common re-clustered (atom_count 2->3), and add/remove.
     resolution = res["resolution"]
     assert resolution.category == DiffCategory.RESOLUTION_CHANGE
-    assert any(r["canonical_key"] == "bag.common" for r in resolution.changed)
+    resolution_change = next(
+        r for r in resolution.changed if r["canonical_key"] == "bag.common"
+    )
+    assert resolution_change["changed_fields"] == ["atom_count"]
+    assert resolution_change["old_atom_count"] == 2
+    assert resolution_change["new_atom_count"] == 3
     assert any(r["canonical_key"] == "bag.new" for r in resolution.added)
     assert any(r["canonical_key"] == "bag.old" for r in resolution.removed)
 
@@ -241,7 +253,8 @@ def test_null_hash_size_change_is_detected(tmp_path):
     _build_null_hash_db(new, big_size=60_500_000, symlink_size=34)  # both grew
 
     with IcarusDiffer(str(old), str(new)) as d:
-        changed = d.files_changed_diff().changed
+        result = d.files_changed_diff()
+        changed = result.changed
     by_path = {c["path"]: c for c in changed}
 
     # The >=50 MB file and the symlink both changed size -> reported via size.
@@ -276,10 +289,13 @@ def test_sha256_change_still_detected_and_labelled(tmp_path):
         finally:
             conn.close()
     with IcarusDiffer(str(old), str(new)) as d:
-        changed = d.files_changed_diff().changed
+        result = d.files_changed_diff()
+        changed = result.changed
     assert len(changed) == 1
     assert changed[0]["path"] == "/f"
     assert changed[0]["change_basis"] == "sha256"
+    assert changed[0]["changed_fields"] == ["sha256"]
+    assert "sha256: hash_old -> hash_new" in result.to_markdown()
 
 
 # --------------------------------------------------------------------------- #
@@ -301,6 +317,15 @@ def test_md_sanitize_neutralizes_hostile_value():
     assert "\\|pipe" in out
     # The whole hostile sequence is not present verbatim.
     assert HOSTILE not in out
+
+
+def test_markdown_rejects_a_malformed_changed_record():
+    result = DiffResult(
+        added=[], removed=[], changed=[{"path": "/same"}],
+        table="files", key_column="path",
+    )
+    with pytest.raises(ValueError, match="changed_fields"):
+        result.to_markdown()
 
 
 def test_report_escaping_added_path_does_not_break(tmp_path):
