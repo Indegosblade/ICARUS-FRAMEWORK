@@ -1,13 +1,18 @@
 """ICARUS STIX 2.1 Export — transform ICARUS entities to STIX 2.1 bundles."""
 
 import json
+import posixpath
 import sqlite3
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
+# This namespace is owned by ICARUS.  Do not change it: identity-policy
+# versions, rather than a new namespace, distinguish future formats.
 _ICARUS_STIX_NAMESPACE = uuid.UUID("28ad9e40-63a7-4de4-a1f0-20f7f1f3cd10")
+_ICARUS_STIX_IDENTITY_POLICY = "icarus-stix-identity-v1"
 
 
 def _stix_id(prefix: str, seed: str) -> str:
@@ -57,15 +62,91 @@ _ENTITY_TABLE_STIX_TYPE = {
 _SCO_ENTITY_TABLES = {"files", "binaries"}
 
 
-def _entity_ref(entity_table: str, entity_id: int) -> str:
-    """Return the canonical STIX id shared by a mapper and its references."""
+def _canonical_path(value: str) -> str:
+    """Normalize a stored path without applying filesystem-specific case rules."""
+    return posixpath.normpath(unicodedata.normalize("NFC", value).replace("\\", "/"))
+
+
+def _canonical_string(value: object) -> str:
+    """Return the Unicode-normalized representation used by identity keys."""
+    return unicodedata.normalize("NFC", str(value))
+
+
+def _file_identity_attributes(path: object, sha256: object) -> dict:
+    attributes = {"path": _canonical_path(str(path))}
+    if sha256:
+        attributes["sha256"] = _canonical_string(sha256).strip().lower()
+    return attributes
+
+
+def _binary_identity_attributes(
+    file_path: object,
+    file_sha256: object,
+    bundle_id: object,
+    executable_name: object,
+    arch: object,
+) -> dict:
+    """Return the domain identity attributes for a binary."""
+    attributes = {
+        "file": _file_identity_attributes(file_path, file_sha256),
+        "executable_name": _canonical_string(executable_name or ""),
+    }
+    if bundle_id:
+        attributes["bundle_id"] = _canonical_string(bundle_id)
+    if arch:
+        attributes["arch"] = _canonical_string(arch)
+    return attributes
+
+
+def _entity_identity_attributes(entity_table: str, row: dict) -> dict:
+    """Return the v1 stable-domain identity attributes for an exported entity."""
+    if entity_table == "files":
+        return _file_identity_attributes(row["path"], row.get("sha256"))
+    if entity_table == "binaries":
+        return _binary_identity_attributes(
+            row["_icarus_file_path"],
+            row.get("_icarus_file_sha256"),
+            row.get("bundle_id"),
+            row.get("executable_name"),
+            row.get("arch"),
+        )
+    if entity_table == "daemons":
+        return {
+            "label": _canonical_string(row["label"]),
+            "plist_path": _canonical_path(str(row["plist_path"])),
+        }
+    if entity_table == "entitlements":
+        return {
+            "binary": _binary_identity_attributes(
+                row["_icarus_file_path"],
+                row.get("_icarus_file_sha256"),
+                row.get("_icarus_binary_bundle_id"),
+                row.get("_icarus_binary_executable_name"),
+                row.get("_icarus_binary_arch"),
+            ),
+            "key": _canonical_string(row["key"]),
+        }
+    raise ValueError(f"Unsupported observation entity table for STIX export: {entity_table!r}")
+
+
+def _entity_ref(entity_table: str, row: dict) -> str:
+    """Return a v1 canonical STIX id shared by mappers and references."""
     try:
         stix_type = _ENTITY_TABLE_STIX_TYPE[entity_table]
     except KeyError as exc:
         raise ValueError(
             f"Unsupported observation entity table for STIX export: {entity_table!r}"
         ) from exc
-    seed = json.dumps([entity_table, entity_id], separators=(",", ":"))
+    seed = json.dumps(
+        {
+            "attributes": _entity_identity_attributes(entity_table, row),
+            "entity_table": entity_table,
+            "policy": _ICARUS_STIX_IDENTITY_POLICY,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
     return _stix_id(stix_type, seed)
 
 
@@ -73,7 +154,7 @@ def _file_to_sco(row: dict) -> dict:
     """Map a files table row to a STIX file SCO."""
     obj = {
         "type": "file",
-        "id": _entity_ref("files", row["id"]),
+        "id": _entity_ref("files", row),
         "spec_version": "2.1",
         "name": row.get("filename", ""),
     }
@@ -90,7 +171,7 @@ def _binary_to_sco(row: dict) -> dict:
     """Map a binaries table row to a STIX file SCO with extension."""
     obj = {
         "type": "file",
-        "id": _entity_ref("binaries", row["id"]),
+        "id": _entity_ref("binaries", row),
         "spec_version": "2.1",
         "name": row.get("executable_name", ""),
     }
@@ -109,7 +190,7 @@ def _daemon_to_sdo(row: dict) -> dict:
     ts = _stix_timestamp(row.get("observed_time"))
     return {
         "type": "infrastructure",
-        "id": _entity_ref("daemons", row["id"]),
+        "id": _entity_ref("daemons", row),
         "spec_version": "2.1",
         "created": ts,
         "modified": ts,
@@ -125,7 +206,7 @@ def _entitlement_to_sdo(row: dict) -> dict:
     ts = _stix_timestamp(row.get("observed_time"))
     return {
         "type": "course-of-action",
-        "id": _entity_ref("entitlements", row["id"]),
+        "id": _entity_ref("entitlements", row),
         "spec_version": "2.1",
         "created": ts,
         "modified": ts,
@@ -134,26 +215,25 @@ def _entitlement_to_sdo(row: dict) -> dict:
     }
 
 
-def _observation_to_sdo(row: dict) -> dict:
+def _observation_to_sdo(row: dict, entity_ref: str) -> dict:
     """Map an observation to observed-data (SCO) or a Sighting (SDO)."""
     ts = _stix_timestamp(row.get("observed_at"))
     seed = json.dumps(
-        [
-            row.get("id"),
-            row["entity_table"],
-            row["entity_id"],
-            row["observed_at"],
-            row.get("event_type", ""),
-        ],
+        {
+            "entity_ref": entity_ref,
+            "event_type": _canonical_string(row.get("event_type", "")),
+            "observed_at": ts,
+            "policy": _ICARUS_STIX_IDENTITY_POLICY,
+        },
+        ensure_ascii=False,
         separators=(",", ":"),
+        sort_keys=True,
     )
-    entity_ref = _entity_ref(row["entity_table"], row["entity_id"])
     common = {
         "spec_version": "2.1",
         "created": ts,
         "modified": ts,
         "x_icarus_entity_table": row["entity_table"],
-        "x_icarus_entity_id": row["entity_id"],
         "x_icarus_event_type": row.get("event_type", ""),
     }
     if row["entity_table"] in _SCO_ENTITY_TABLES:
@@ -177,11 +257,24 @@ def _observation_to_sdo(row: dict) -> dict:
     }
 
 
-_ENTITY_QUERIES = {
-    "files": "SELECT * FROM files WHERE id = ?",
-    "binaries": "SELECT * FROM binaries WHERE id = ?",
-    "daemons": "SELECT * FROM daemons WHERE id = ?",
-    "entitlements": "SELECT * FROM entitlements WHERE id = ?",
+_ENTITY_SELECTS = {
+    "files": "SELECT files.* FROM files",
+    "binaries": """
+        SELECT binaries.*, files.path AS _icarus_file_path,
+               files.sha256 AS _icarus_file_sha256
+        FROM binaries JOIN files ON files.id = binaries.file_id
+    """,
+    "daemons": "SELECT daemons.* FROM daemons",
+    "entitlements": """
+        SELECT entitlements.*, files.path AS _icarus_file_path,
+               files.sha256 AS _icarus_file_sha256,
+               binaries.bundle_id AS _icarus_binary_bundle_id,
+               binaries.executable_name AS _icarus_binary_executable_name,
+               binaries.arch AS _icarus_binary_arch
+        FROM entitlements
+        JOIN binaries ON binaries.id = entitlements.binary_id
+        JOIN files ON files.id = binaries.file_id
+    """,
 }
 
 _ENTITY_MAPPERS = {
@@ -197,13 +290,13 @@ def _load_observation_target(
 ) -> dict:
     """Load and map an observation target, refusing a dangling reference."""
     try:
-        query = _ENTITY_QUERIES[entity_table]
+        query = _ENTITY_SELECTS[entity_table]
         mapper = _ENTITY_MAPPERS[entity_table]
     except KeyError as exc:
         raise ValueError(
             f"Unsupported observation entity table for STIX export: {entity_table!r}"
         ) from exc
-    row = conn.execute(query, (entity_id,)).fetchone()
+    row = conn.execute(f"{query} WHERE {entity_table}.id = ?", (entity_id,)).fetchone()
     if row is None:
         raise ValueError(
             "Observation target does not exist: "
@@ -240,26 +333,26 @@ def export_to_stix(
         ]
 
         if "files" in tables:
-            for row in conn.execute("SELECT * FROM files").fetchall():
+            for row in conn.execute(_ENTITY_SELECTS["files"]).fetchall():
                 _append_unique(objects, objects_by_id, _file_to_sco(dict(row)))
 
         if "binaries" in tables:
             try:
-                for row in conn.execute("SELECT * FROM binaries").fetchall():
+                for row in conn.execute(_ENTITY_SELECTS["binaries"]).fetchall():
                     _append_unique(objects, objects_by_id, _binary_to_sco(dict(row)))
             except sqlite3.OperationalError:
                 pass
 
         if "daemons" in tables:
             try:
-                for row in conn.execute("SELECT * FROM daemons").fetchall():
+                for row in conn.execute(_ENTITY_SELECTS["daemons"]).fetchall():
                     _append_unique(objects, objects_by_id, _daemon_to_sdo(dict(row)))
             except sqlite3.OperationalError:
                 pass
 
         if "entitlements" in tables:
             try:
-                for row in conn.execute("SELECT * FROM entitlements").fetchall():
+                for row in conn.execute(_ENTITY_SELECTS["entitlements"]).fetchall():
                     _append_unique(objects, objects_by_id, _entitlement_to_sdo(dict(row)))
             except sqlite3.OperationalError:
                 pass
@@ -268,20 +361,18 @@ def export_to_stix(
             try:
                 for row in conn.execute("SELECT * FROM observations").fetchall():
                     observation = dict(row)
-                    target_ref = _entity_ref(
-                        observation["entity_table"], observation["entity_id"]
+                    target = _load_observation_target(
+                        conn,
+                        observation["entity_table"],
+                        observation["entity_id"],
                     )
+                    target_ref = target["id"]
                     if target_ref not in objects_by_id:
-                        target = _load_observation_target(
-                            conn,
-                            observation["entity_table"],
-                            observation["entity_id"],
-                        )
                         _append_unique(objects, objects_by_id, target)
                     _append_unique(
                         objects,
                         objects_by_id,
-                        _observation_to_sdo(observation),
+                        _observation_to_sdo(observation, target_ref),
                     )
             except sqlite3.OperationalError:
                 pass

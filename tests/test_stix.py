@@ -11,7 +11,6 @@ import pytest
 
 from icarus.core.schema import initialize_database
 from icarus.integrations.stix_export import (
-    _entity_ref,
     _stix_timestamp,
     diff_to_stix,
     export_to_stix,
@@ -38,6 +37,173 @@ def _build_db():
     conn.commit()
     conn.close()
     return db_path
+
+
+def _build_identity_fixture(
+    db_path: Path,
+    *,
+    filler_first: bool,
+    reverse_insert_order: bool,
+    target_path: str = "/same/target.bin",
+    target_sha256: str = "a" * 64,
+) -> None:
+    """Build equivalent logical rows while deliberately changing SQLite IDs."""
+    initialize_database(db_path, {"source": "identity-test"})
+    conn = sqlite3.connect(str(db_path))
+    entities = ["filler", "target"] if filler_first else ["target", "filler"]
+    dependent_entities = list(entities)
+    if reverse_insert_order:
+        dependent_entities.reverse()
+
+    file_ids = {}
+    for entity in entities:
+        is_target = entity == "target"
+        cursor = conn.execute(
+            "INSERT INTO files (path, filename, sha256, file_type, observed_time) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                target_path if is_target else "/unrelated/filler.bin",
+                "target.bin" if is_target else "filler.bin",
+                target_sha256 if is_target else "b" * 64,
+                "binary",
+                "2026-07-18T12:34:56Z",
+            ),
+        )
+        file_ids[entity] = cursor.lastrowid
+
+    binary_ids = {}
+    for entity in dependent_entities:
+        cursor = conn.execute(
+            "INSERT INTO binaries "
+            "(file_id, bundle_id, executable_name, arch, observed_time) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                file_ids[entity],
+                f"com.example.{entity}",
+                f"{entity}.bin",
+                "arm64",
+                "2026-07-18T12:34:56Z",
+            ),
+        )
+        binary_ids[entity] = cursor.lastrowid
+
+    daemon_ids = {}
+    for entity in dependent_entities:
+        cursor = conn.execute(
+            "INSERT INTO daemons (label, plist_path, program, observed_time) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                f"com.example.{entity}",
+                f"/Library/LaunchDaemons/{entity}.plist",
+                f"/usr/bin/{entity}",
+                "2026-07-18T12:34:56Z",
+            ),
+        )
+        daemon_ids[entity] = cursor.lastrowid
+
+    entitlement_ids = {}
+    for entity in dependent_entities:
+        cursor = conn.execute(
+            "INSERT INTO entitlements (binary_id, key, value, observed_time) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                binary_ids[entity],
+                f"com.example.{entity}",
+                "true",
+                "2026-07-18T12:34:56Z",
+            ),
+        )
+        entitlement_ids[entity] = cursor.lastrowid
+
+    observations = [
+        ("files", file_ids["target"], "target-file-seen"),
+        ("binaries", binary_ids["target"], "target-binary-seen"),
+        ("daemons", daemon_ids["target"], "target-daemon-seen"),
+        ("entitlements", entitlement_ids["target"], "target-entitlement-seen"),
+        ("files", file_ids["filler"], "filler-seen"),
+    ]
+    if reverse_insert_order:
+        observations.reverse()
+    for entity_table, entity_id, event_type in observations:
+        conn.execute(
+            "INSERT INTO observations (entity_table, entity_id, observed_at, event_type) "
+            "VALUES (?, ?, ?, ?)",
+            (entity_table, entity_id, "2026-07-18T12:34:56Z", event_type),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _target_stix_ids(bundle: dict) -> dict:
+    """Return target IDs by semantic marker, independent of database row IDs."""
+    ids = {}
+    for obj in bundle["objects"]:
+        if obj["type"] == "file" and obj.get("hashes", {}).get("SHA-256", "").lower() == "a" * 64:
+            ids["file"] = obj["id"]
+        elif (
+            obj["type"] == "file"
+            and obj.get("x_icarus_binary", {}).get("bundle_id") == "com.example.target"
+        ):
+            ids["binary"] = obj["id"]
+        elif obj["type"] == "infrastructure" and obj["name"] == "com.example.target":
+            ids["daemon"] = obj["id"]
+        elif obj["type"] == "course-of-action" and obj["name"] == "com.example.target":
+            ids["entitlement"] = obj["id"]
+        elif obj.get("x_icarus_event_type", "").startswith("target-"):
+            ids[obj["x_icarus_event_type"]] = obj["id"]
+    return ids
+
+
+@pytest.mark.parametrize(
+    "filler_first,reverse_insert_order",
+    [(a, b) for a in (False, True) for b in (False, True)],
+)
+def test_stix_identity_is_stable_across_rebuild_order_and_unrelated_rows(
+    tmp_path, filler_first, reverse_insert_order
+):
+    """#90: stable IDs and refs survive row-ID permutations and unrelated rows."""
+    baseline_db = tmp_path / "baseline.db"
+    variant_db = tmp_path / "variant.db"
+    _build_identity_fixture(baseline_db, filler_first=False, reverse_insert_order=False)
+    _build_identity_fixture(
+        variant_db,
+        filler_first=filler_first,
+        reverse_insert_order=reverse_insert_order,
+        target_path=r"\same\target.bin",
+        target_sha256="A" * 64,
+    )
+    baseline = export_to_stix(baseline_db, tmp_path / "baseline.json")
+    variant = export_to_stix(variant_db, tmp_path / "variant.json")
+
+    baseline_ids = _target_stix_ids(baseline)
+    variant_ids = _target_stix_ids(variant)
+    assert variant_ids == baseline_ids
+
+    objects = {obj["id"]: obj for obj in variant["objects"]}
+    assert objects[variant_ids["target-file-seen"]]["object_refs"] == [variant_ids["file"]]
+    assert objects[variant_ids["target-binary-seen"]]["object_refs"] == [variant_ids["binary"]]
+    assert objects[variant_ids["target-daemon-seen"]]["sighting_of_ref"] == variant_ids["daemon"]
+    assert (
+        objects[variant_ids["target-entitlement-seen"]]["sighting_of_ref"]
+        == variant_ids["entitlement"]
+    )
+
+
+def test_stix_identity_changes_when_a_material_domain_attribute_changes(tmp_path):
+    original_db = tmp_path / "original.db"
+    changed_db = tmp_path / "changed.db"
+    _build_identity_fixture(original_db, filler_first=False, reverse_insert_order=False)
+    _build_identity_fixture(
+        changed_db,
+        filler_first=True,
+        reverse_insert_order=True,
+        target_path="/same/renamed-target.bin",
+    )
+
+    original_ids = _target_stix_ids(export_to_stix(original_db, tmp_path / "original.json"))
+    changed_ids = _target_stix_ids(export_to_stix(changed_db, tmp_path / "changed.json"))
+    for key in ("file", "binary", "entitlement", "target-file-seen", "target-binary-seen"):
+        assert changed_ids[key] != original_ids[key]
 
 
 def test_stix_export_produces_bundle():
@@ -275,7 +441,8 @@ def test_stix_daemon_observation_becomes_sighting_with_resolved_ref():
         assert TIMESTAMP_RE.match(obj.get("modified", "")), obj.get("modified")
         assert TIMESTAMP_RE.match(obj.get("first_seen", "")), obj.get("first_seen")
         assert TIMESTAMP_RE.match(obj.get("last_seen", "")), obj.get("last_seen")
-        assert obj["sighting_of_ref"] == _entity_ref("daemons", daemon_id)
+        daemon = next(o for o in bundle["objects"] if o["type"] == "infrastructure")
+        assert obj["sighting_of_ref"] == daemon["id"]
         assert obj["sighting_of_ref"] in {o["id"] for o in bundle["objects"]}
     finally:
         db.unlink(missing_ok=True)
