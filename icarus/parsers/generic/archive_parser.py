@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, BinaryIO, Dict
 
+from icarus.core.detection import DetectionEvidence
 from icarus.core.schema import open_db
 from icarus.parsers.base import BaseParser
 
@@ -49,6 +50,12 @@ class ArchiveParser(BaseParser):
                 if f.lower().endswith((".zip", ".tar", ".tar.gz", ".tgz", ".gz")):
                     return True
         return False
+
+    def identify_evidence(self, evidence: DetectionEvidence) -> bool:
+        return any(
+            entry.relative.lower().endswith((".zip", ".tar", ".tar.gz", ".tgz", ".gz"))
+            for entry in evidence.files
+        )
 
     def extract_entities(self, source: Path, db_path: Path) -> Dict[str, Any]:
         conn = open_db(db_path)

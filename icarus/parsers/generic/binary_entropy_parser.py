@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from icarus.core.detection import DetectionEvidence
 from icarus.core.schema import open_db
 from icarus.parsers.base import BATCH_COMMIT_INTERVAL, MAX_HASH_FILE_SIZE, BaseParser
 
@@ -46,6 +47,9 @@ class BinaryEntropyParser(BaseParser):
             if filenames:
                 return True
         return False
+
+    def identify_evidence(self, evidence: DetectionEvidence) -> bool:
+        return bool(evidence.files)
 
     def extract_entities(self, source: Path, db_path: Path) -> Dict[str, Any]:
         conn = open_db(db_path)

@@ -12,6 +12,7 @@ import struct
 from pathlib import Path
 from typing import Any, Dict
 
+from icarus.core.detection import DetectionEvidence
 from icarus.core.schema import open_db
 from icarus.parsers.base import BATCH_COMMIT_INTERVAL, BaseParser
 
@@ -65,6 +66,12 @@ class WindowsParser(BaseParser):
             if dirs_seen >= _IDENTIFY_DIR_BUDGET:
                 return False
         return False
+
+    def identify_evidence(self, evidence: DetectionEvidence) -> bool:
+        return any(
+            entry.relative.lower().endswith((".exe", ".dll"))
+            for entry in evidence.files
+        )
 
     def extract_entities(self, source: Path, db_path: Path) -> Dict[str, Any]:
         conn = open_db(db_path)

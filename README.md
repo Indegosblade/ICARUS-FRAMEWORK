@@ -226,7 +226,11 @@ full development guide.
 
 ### Built-in parsers
 
-9 parsers — 8 production, 1 candidate. Auto-detection runs each parser's `identify()` method against the source; the most specific match (lowest specificity number) wins.
+9 parsers — 8 production, 1 candidate. Auto-detection takes one deterministic,
+shared sample of at most 5,000 tree entries and 4 MiB of source bytes; built-in
+parsers inspect that sample, and the most specific match (lowest specificity
+number) wins. If either budget is exhausted, ICARUS refuses to guess and asks for
+an explicit `--parser` value.
 
 | Parser | Tier | Spec | Description |
 |--------|------|:----:|-------------|
