@@ -920,6 +920,29 @@ def _repair_migrated_non_fk_objects(conn: sqlite3.Connection) -> None:
     Rebuild only tables absent on entry, so pre-existing rows are searchable
     without needlessly rewriting valid existing indexes.
     """
+    required_columns = {
+        "files": {"path", "filename", "extension", "size", "file_type"},
+        "binaries": {"file_id", "bundle_id", "executable_name"},
+        "daemons": {
+            "label", "program", "mach_services", "sandbox_profile",
+            "user_name", "binary_id",
+        },
+        "entitlements": {"binary_id", "key", "value"},
+        "sandbox_profiles": {"name"},
+        "sandbox_rules": {"profile_id", "operation"},
+        "kexts": {
+            "bundle_id", "name", "version", "personalities",
+            "iokit_classes", "has_user_client",
+        },
+        "frameworks": {"name"},
+    }
+    for table, required in required_columns.items():
+        columns = {
+            row[1] for row in conn.execute(f"PRAGMA table_info([{table}])")
+        }
+        if not required <= columns:
+            return
+
     fts_names = ("files_fts", "daemons_fts", "atoms_fts")
     existing_fts = {
         row[0]

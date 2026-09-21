@@ -299,7 +299,9 @@ def test_zip_forged_eocd_and_zip64_metadata_skip_before_zipfile(tmp_path, monkey
     monkeypatch.setattr(archive_module.zipfile, "ZipFile", should_not_open)
     forged = tmp_path / "forged.zip"
     # EOCD says ZIP64 is required, but provides no preceding ZIP64 locator.
-    forged.write_bytes(b"PK\x05\x06" + b"\0" * 6 + b"\xff\xff" * 3 + b"\0\0")
+    forged.write_bytes(
+        b"PK\x05\x06" + b"\0" * 4 + b"\xff\xff" * 2 + b"\xff" * 8 + b"\0\0"
+    )
     with pytest.warns(RuntimeWarning, match="ZIP64 locator"):
         assert _list_archive(forged) == []
 

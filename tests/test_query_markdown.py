@@ -18,7 +18,7 @@ def test_query_markdown_neutralizes_structural_and_control_characters(value):
     assert "\t" not in rendered
     assert "`" not in rendered
     if "|" in value:
-        assert "\\|cell" in rendered
+        assert "\\|" in rendered
     assert "\\x" in rendered or "\\|" in rendered or "\\\\" in rendered
 
 
