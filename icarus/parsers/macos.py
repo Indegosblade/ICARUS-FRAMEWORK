@@ -27,6 +27,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from icarus.core.detection import DetectionEvidence
 from icarus.core.schema import open_db
 from icarus.parsers.base import BATCH_COMMIT_INTERVAL, BaseParser, link_daemons_to_binaries
 from icarus.parsers.macho import is_macho_magic, macho_info
@@ -121,6 +122,17 @@ class MacosParser(BaseParser):
             source / "System" / "Library" / "Extensions",
         ]
         return sum(1 for m in markers if m.is_dir()) >= 2
+
+    def identify_evidence(self, evidence: DetectionEvidence) -> bool:
+        if evidence.has_file("System/Library/CoreServices/SystemVersion.plist"):
+            return True
+        markers = (
+            "System/Library/LaunchDaemons",
+            "System/Library/Frameworks",
+            "System/Library/CoreServices",
+            "System/Library/Extensions",
+        )
+        return sum(evidence.has_directory(marker) for marker in markers) >= 2
 
     def extract_entities(self, source: Path, db_path: Path) -> Dict[str, Any]:
         conn = open_db(db_path)

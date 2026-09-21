@@ -17,6 +17,7 @@ def cmd_build(args):
     import os
     import uuid
 
+    from icarus.core.detection import DetectionBudgetExceeded
     from icarus.core.pipeline import create_default_pipeline
     from icarus.core.schema import open_db
     from icarus.parsers import detect_parser
@@ -28,7 +29,11 @@ def cmd_build(args):
 
     parser_name = args.parser
     if parser_name is None:
-        parser_name = detect_parser(source)
+        try:
+            parser_name = detect_parser(source)
+        except DetectionBudgetExceeded as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
         if parser_name is None:
             print(
                 "ERROR: Could not auto-detect source type. Specify --parser",
