@@ -117,8 +117,11 @@ icarus query intel.db --sql "SELECT path, size FROM files WHERE size > 100000000
 # Diff — compare two databases
 icarus diff v1.db v2.db -o report.md
 
-# Diff — export as STIX 2.1 bundle
+# Diff — export as STIX 2.1 bundle (the Markdown report still prints to stdout)
 icarus diff v1.db v2.db --stix bundle.json
+
+# Diff — write both the Markdown report and STIX bundle
+icarus diff v1.db v2.db -o report.md --stix bundle.json
 
 # Parsers — list, validate, test
 icarus parser list
