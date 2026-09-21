@@ -63,12 +63,19 @@ Schema: `icarus/parsers/schema/parser_manifest.schema.json`
 
 The registry holds all parser instances and their manifests. Registration is automatic: every concrete `BaseParser` subclass found anywhere under `icarus/parsers/` — including local-only parsers in the gitignored `icarus/parsers/private/` package — is discovered and registered at import time, and an installed distribution can advertise additional parsers through the `icarus.parsers` entry-point group. There is no hand-maintained list of parsers to keep in sync; discovery and manifest-load failures are logged rather than silently swallowed. See [about/PARSERS.md](../about/PARSERS.md) for the registration walkthrough.
 
-When `icarus build` runs without `--parser`, the registry runs a **detection contest**:
+When `icarus build` runs without `--parser`, the registry collects one shared
+sample of at most 5,000 tree entries and 4 MiB of file content, then runs a
+**detection contest**:
 
 1. Every registered parser's `identify()` runs against the source
 2. Parsers that return True are candidates
 3. Candidates sorted by specificity (lower wins), then confidence (higher wins)
 4. Winner becomes the active parser
+
+The source tree is traversed once and symlinked directories are not followed.
+If either sample budget is exhausted, ICARUS refuses to select from incomplete
+evidence and requests an explicit `--parser`. Supplying `--parser` bypasses the
+detection sample.
 
 This means CloudTrail (specificity 5) always beats Windows (20) which always beats generic (100). If you write a parser with specificity 10, it automatically slots between CloudTrail and Windows.
 
@@ -101,7 +108,11 @@ the opened descriptor before reading. Symlinks remain visible as metadata rows
 without dereferencing their targets; special files are skipped with a warning;
 filesystem surrogate bytes are escaped before SQLite binding. JSON
 recursion/memory failures skip one file, and compressed tar inspection has a
-64 MiB decompressed-data ceiling.
+64 MiB decompressed-data ceiling. ZIP member listing is skipped before Python's
+eager central-directory parser runs when the archive exceeds 64 MiB, its central
+directory exceeds 8 MiB, it declares more than 10,000 entries, or its ZIP/ZIP64
+metadata is malformed. The archive itself is still cataloged and a warning
+explains why its members were not listed.
 
 ### 4. Test Harness
 
