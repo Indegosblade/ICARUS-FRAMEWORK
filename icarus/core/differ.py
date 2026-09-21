@@ -19,7 +19,6 @@ they are assigned per-build and carry no cross-version meaning.
 
 import enum
 import json
-import re
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -27,38 +26,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from icarus.core import validate_column, validate_table
+from icarus.core.markdown import sanitize_markdown
 
 DIFF_DISPLAY_LIMIT = 50
 
-# C0/C1 control characters: 0x00-0x1F (incl. NUL, tab, LF, CR), DEL (0x7F), and
-# the C1 range 0x80-0x9F. This deliberately covers the ESC (0x1B) that begins
-# ANSI/terminal escape sequences.
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-
-
 def _md_sanitize(value: Any) -> str:
-    """Neutralize a source-derived value before it is placed into Markdown.
-
-    ICARUS diffs untrusted export trees: a file path, entitlement key, or
-    structural description can carry backticks, pipes, newlines, or terminal
-    control/ANSI escapes chosen to break out of a code span or table cell, inject
-    Markdown, or emit terminal control codes when the report is viewed. This
-    renders any value inert while keeping legitimate readable paths readable.
-
-    Order matters: escape backslashes FIRST so the single backslashes introduced
-    by the later escapes (``\\|`` and ``\\xNN``) are not themselves doubled.
-    Backticks are replaced (not backslash-escaped) because backslash escaping
-    does not work inside a Markdown code span — a raw backtick would still close
-    the span — so the character itself must never survive.
-    """
-    text = "null" if value is None else str(value)
-    text = text.replace("\\", "\\\\")          # 1. escape literal backslashes
-    text = text.replace("`", "\\x60")          # 2. defuse code-span-closing backticks
-    text = text.replace("|", "\\|")            # 3. escape table-cell pipes
-    text = _CONTROL_RE.sub(                     # 4. defuse control/ANSI/newline bytes
-        lambda m: f"\\x{ord(m.group()):02x}", text
-    )
-    return text
+    """Backward-compatible alias for the shared Markdown sanitization policy."""
+    return sanitize_markdown(value)
 
 
 def canonical_diff_value(value: Any) -> str:
@@ -931,8 +905,8 @@ class IcarusDiffer:
         """Generate a full Markdown diff report."""
         results = self.full_diff()
         lines = ["# ICARUS Version Diff\n",
-                 f"Old: `{self.old_path.name}`\n",
-                 f"New: `{self.new_path.name}`\n",
+                 f"Old: `{_md_sanitize(self.old_path.name)}`\n",
+                 f"New: `{_md_sanitize(self.new_path.name)}`\n",
                  "---\n"]
 
         for name, diff in results.items():
