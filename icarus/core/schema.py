@@ -908,6 +908,41 @@ def _repair_migrated_entity_fks(conn: sqlite3.Connection) -> None:
         conn.execute(f"PRAGMA foreign_keys = {'ON' if prior_fk else 'OFF'}")
 
 
+def _repair_migrated_non_fk_objects(conn: sqlite3.Connection) -> None:
+    """Restore non-table objects omitted by older additive migrations.
+
+    Older v2-v5 migration steps could reach v6 without some indexes, FTS
+    tables/triggers, or views that a fresh v6 build has. Replaying the
+    canonical DDL with ``IF NOT EXISTS`` is guarded, additive, and idempotent:
+    existing objects are left untouched.
+
+    FTS5 external-content tables do not index rows that predate their creation.
+    Rebuild only tables absent on entry, so pre-existing rows are searchable
+    without needlessly rewriting valid existing indexes.
+    """
+    fts_names = ("files_fts", "daemons_fts", "atoms_fts")
+    existing_fts = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN "
+            "('files_fts', 'daemons_fts', 'atoms_fts')"
+        )
+    }
+
+    conn.executescript(INDEXES)
+    conn.executescript(FTS_SCHEMA)
+    conn.executescript(FTS_TRIGGERS)
+    conn.executescript(VIEWS)
+
+    for fts_name in fts_names:
+        if fts_name in existing_fts:
+            continue
+        quoted = f'"{fts_name}"'
+        conn.execute(
+            f"INSERT INTO {quoted}({quoted}) VALUES ('rebuild')"  # nosec B608 - fts_name is a fixed allowlist
+        )
+
+
 def _read_schema_version(conn: sqlite3.Connection) -> Optional[int]:
     """Read and validate the metadata schema version without changing the database."""
     metadata_exists = conn.execute(
@@ -951,6 +986,8 @@ def initialize_database(db_path: Path, metadata: Optional[dict] = None) -> dict:
                 "the database"
             )
 
+        migrated = existing_version is not None and existing_version < SCHEMA_VERSION
+
         if existing_version == 2:
             migrate_v2_to_v3(conn)
             migrate_v3_to_v4(conn)
@@ -977,6 +1014,12 @@ def initialize_database(db_path: Path, metadata: Optional[dict] = None) -> dict:
                 "INSERT INTO metadata VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION))
             )
+
+        # Complete the additive migration before the v6 validation path is used
+        # on the next open. The repair is limited to databases that actually
+        # migrated from a supported older version.
+        if migrated:
+            _repair_migrated_non_fk_objects(conn)
 
         # Restore fresh-vs-migrated schema parity: any DB that reached v6 by
         # migration (or was stamped v6 by an older, buggy migration chain) is
