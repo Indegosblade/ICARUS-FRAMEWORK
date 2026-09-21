@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from icarus.core import VALID_FTS_TABLES, VALID_TABLES
+from icarus.core.markdown import sanitize_markdown
 from icarus.core.schema import open_db
 
 QUERY_DISPLAY_LIMIT = 100
@@ -19,7 +20,12 @@ FTS_RESULT_LIMIT = 100
 class QueryResult:
     """Structured query result with metadata."""
 
-    def __init__(self, rows: List[tuple], columns: List[str], query_name: str = ""):
+    def __init__(
+        self,
+        rows: List[tuple],
+        columns: List[str],
+        query_name: str = "",
+    ):
         self.rows = rows
         self.columns = columns
         self.query_name = query_name
@@ -33,13 +39,15 @@ class QueryResult:
 
     def to_markdown(self) -> str:
         if not self.rows:
-            return f"*{self.query_name}: No results.*\n"
+            return f"*{sanitize_markdown(self.query_name)}: No results.*\n"
 
         lines = []
         if self.query_name:
-            lines.append(f"### {self.query_name} ({self.count} results)\n")
+            lines.append(
+                f"### {sanitize_markdown(self.query_name)} ({self.count} results)\n"
+            )
 
-        lines.append("| " + " | ".join(self.columns) + " |")
+        lines.append("| " + " | ".join(map(sanitize_markdown, self.columns)) + " |")
         lines.append("| " + " | ".join(["---"] * len(self.columns)) + " |")
 
         for row in self.rows[:QUERY_DISPLAY_LIMIT]:
@@ -48,7 +56,7 @@ class QueryResult:
                 s = str(v) if v is not None else ""
                 if len(s) > 60:
                     s = s[:57] + "..."
-                cells.append(s)
+                cells.append(sanitize_markdown(s))
             lines.append("| " + " | ".join(cells) + " |")
 
         if self.count > QUERY_DISPLAY_LIMIT:
