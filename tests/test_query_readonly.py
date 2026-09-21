@@ -117,6 +117,26 @@ def test_default_query_connection_reports_writable_false(tmp_path):
         # A SELECT still works — read-only, not closed.
         assert q.execute("SELECT COUNT(*) FROM files").rows[0][0] == 1
 
+
+def test_query_fetch_is_bounded_and_reports_truncation(tmp_path):
+    db = _make_db(tmp_path)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT INTO files (path, filename) VALUES (?, ?)",
+            [(f"/row-{i}", f"row-{i}") for i in range(200)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with IcarusQuery(str(db)) as q:
+        result = q.execute("SELECT path FROM files ORDER BY path")
+
+    assert len(result.rows) == 100
+    assert result.truncated is True
+    assert "Results truncated at 100 rows" in result.to_markdown()
+
 def test_insert_is_refused(tmp_path):
     db = _make_db(tmp_path)
     before = _count(db)

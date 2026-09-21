@@ -25,10 +25,13 @@ class QueryResult:
         rows: List[tuple],
         columns: List[str],
         query_name: str = "",
+        *,
+        truncated: bool = False,
     ):
         self.rows = rows
         self.columns = columns
         self.query_name = query_name
+        self.truncated = truncated
 
     @property
     def count(self) -> int:
@@ -59,7 +62,9 @@ class QueryResult:
                 cells.append(sanitize_markdown(s))
             lines.append("| " + " | ".join(cells) + " |")
 
-        if self.count > QUERY_DISPLAY_LIMIT:
+        if self.truncated:
+            lines.append(f"\n*Results truncated at {QUERY_DISPLAY_LIMIT} rows.*")
+        elif self.count > QUERY_DISPLAY_LIMIT:
             lines.append(f"\n*... and {self.count - QUERY_DISPLAY_LIMIT} more rows.*")
 
         return "\n".join(lines)
@@ -115,11 +120,14 @@ class IcarusQuery:
         self.conn.commit()
 
     def execute(self, sql: str, params: tuple = ()) -> QueryResult:
-        """Execute raw SQL and return structured result."""
+        """Execute raw SQL with a bounded result set for terminal display."""
         cursor = self.conn.execute(sql, params)
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
-        rows = cursor.fetchall()
-        return QueryResult([tuple(r) for r in rows], columns)
+        rows = [tuple(row) for row in cursor.fetchmany(QUERY_DISPLAY_LIMIT + 1)]
+        truncated = len(rows) > QUERY_DISPLAY_LIMIT
+        if truncated:
+            rows.pop()
+        return QueryResult(rows, columns, truncated=truncated)
 
     def search(self, query: str, table: str = "files") -> QueryResult:
         """Full-text search via FTS5."""
