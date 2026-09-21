@@ -6,6 +6,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Dict
 
+from icarus.core.detection import DetectionEvidence
 from icarus.core.schema import open_db
 from icarus.parsers.base import BATCH_COMMIT_INTERVAL, BaseParser
 
@@ -30,6 +31,9 @@ class JsonParser(BaseParser):
                 if f.lower().endswith(".json"):
                     return True
         return False
+
+    def identify_evidence(self, evidence: DetectionEvidence) -> bool:
+        return any(entry.relative.lower().endswith(".json") for entry in evidence.files)
 
     def extract_entities(self, source: Path, db_path: Path) -> Dict[str, Any]:
         conn = open_db(db_path)

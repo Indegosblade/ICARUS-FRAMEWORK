@@ -191,6 +191,29 @@ def test_cli_stix_diff_requires_explicit_unsafe_override(tmp_path, capsys):
         out.unlink(missing_ok=True)
 
 
+def test_cli_diff_writes_report_and_stix_when_both_outputs_requested(tmp_path, capsys):
+    old = _build_db()
+    new = _build_db()
+    report = tmp_path / "report.md"
+    stix = tmp_path / "bundle.json"
+    try:
+        args = types.SimpleNamespace(
+            old=str(old), new=str(new), output=str(report), stix=str(stix),
+            allow_unverified=True,
+        )
+        cli.cmd_diff(args)
+        output = capsys.readouterr().out
+        assert report.exists()
+        assert stix.exists()
+        assert "Report written to" in output
+        assert "STIX bundle written to" in output
+    finally:
+        old.unlink(missing_ok=True)
+        new.unlink(missing_ok=True)
+        report.unlink(missing_ok=True)
+        stix.unlink(missing_ok=True)
+
+
 def test_stix_export_rejects_active_wal_without_sidecar_changes(tmp_path):
     from icarus.core.schema import open_db
 

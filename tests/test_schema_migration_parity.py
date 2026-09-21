@@ -46,6 +46,14 @@ def _normalize_ddl(sql):
     return None if sql is None else " ".join(sql.split())
 
 
+def _normalize_structural_ddl(sql):
+    """Normalize harmless SQLite DDL formatting differences."""
+    if sql is None:
+        return None
+    compact = re.sub(r"\s*([(),;])\s*", r"\1", " ".join(sql.split()))
+    return compact.lower()
+
+
 def _strip_provenance_columns(create_sql: str) -> str:
     """Return an entity-table CREATE statement with the four provenance columns
     removed — i.e. the table as it existed at schema v2."""
@@ -127,6 +135,41 @@ def _foreign_keys(path, table) -> set:
         conn.close()
 
 
+def _all_schema_objects(path) -> dict:
+    """Return normalized user sqlite_master objects, including FTS shadows."""
+    conn = sqlite3.connect(str(path))
+    try:
+        rows = conn.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    finally:
+        conn.close()
+    return {
+        (obj_type, name): _normalize_structural_ddl(sql)
+        for obj_type, name, sql in rows
+    }
+
+
+def _remove_non_fk_objects(path) -> None:
+    """Make the legacy fixture exercise every additive non-FK repair path."""
+    conn = sqlite3.connect(str(path))
+    try:
+        for view in ("v_sandbox_escape_surface", "v_kernel_attack_surface", "v_test_binaries"):
+            conn.execute(f"DROP VIEW IF EXISTS [{view}]")
+        for trigger in re.findall(
+            r"CREATE TRIGGER IF NOT EXISTS (\w+)", FTS_TRIGGERS
+        ):
+            conn.execute(f"DROP TRIGGER IF EXISTS [{trigger}]")
+        for fts_table in ("files_fts", "daemons_fts"):
+            conn.execute(f"DROP TABLE IF EXISTS [{fts_table}]")
+        for index in re.findall(r"CREATE INDEX IF NOT EXISTS (\w+)", INDEXES):
+            conn.execute(f"DROP INDEX IF EXISTS [{index}]")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 @pytest.fixture
 def migrated_v6_db(tmp_path):
     """A v2 database with seed rows, migrated up to v6 through the real chain."""
@@ -142,6 +185,26 @@ def migrated_v6_db(tmp_path):
 
     result = initialize_database(db)
     assert result["schema_version"] == 6
+    return db
+
+
+@pytest.fixture
+def incomplete_migrated_v6_db(tmp_path):
+    """A v2 database missing all non-FK objects repaired at the v6 boundary."""
+    db = tmp_path / "incomplete-migrated.db"
+    build_legacy_v2_database(db)
+    _remove_non_fk_objects(db)
+
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "INSERT INTO files (path, filename) VALUES ('/bin/legacy', 'legacy')"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert initialize_database(db)["schema_version"] == 6
     return db
 
 
@@ -172,6 +235,56 @@ def test_migrated_entity_schema_matches_fresh(migrated_v6_db, fresh_v6_db):
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         conn.close()
+
+
+def test_migrated_schema_objects_match_fresh(
+    incomplete_migrated_v6_db, fresh_v6_db
+):
+    """Every user sqlite_master object, not only entity FKs, reaches parity."""
+    assert _all_schema_objects(incomplete_migrated_v6_db) == _all_schema_objects(
+        fresh_v6_db
+    )
+
+    # A second open runs the current-version validation path successfully.
+    assert initialize_database(incomplete_migrated_v6_db)["schema_version"] == 6
+
+
+def test_non_fk_repair_is_idempotent_and_resyncs_fts(incomplete_migrated_v6_db):
+    """Missing objects are repaired once and FTS triggers resync migrated rows."""
+    before = _all_schema_objects(incomplete_migrated_v6_db)
+    conn = schema.open_db(incomplete_migrated_v6_db)
+    try:
+        schema._repair_migrated_non_fk_objects(conn)
+        schema._repair_migrated_non_fk_objects(conn)
+        conn.commit()
+        conn.execute(
+            "INSERT INTO versions "
+            "(run_id, parser_name, started_at) VALUES ('fts-run', 'test', 'now')"
+        )
+        version_id = conn.execute("SELECT id FROM versions WHERE run_id = 'fts-run'").fetchone()[0]
+        conn.execute(
+            "INSERT INTO atoms "
+            "(source_version_id, entity_type, source_key, properties, created_at) "
+            "VALUES (?, 'test', 'key', 'before_marker', 'now')",
+            (version_id,),
+        )
+        conn.commit()
+        assert conn.execute(
+            "SELECT rowid FROM atoms_fts WHERE atoms_fts MATCH 'before_marker'"
+        ).fetchone()
+        conn.execute("UPDATE atoms SET properties = 'after_marker' WHERE source_key = 'key'")
+        conn.commit()
+        assert conn.execute(
+            "SELECT rowid FROM atoms_fts WHERE atoms_fts MATCH 'before_marker'"
+        ).fetchone() is None
+        assert conn.execute(
+            "SELECT rowid FROM atoms_fts WHERE atoms_fts MATCH 'after_marker'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    after = _all_schema_objects(incomplete_migrated_v6_db)
+    assert after == before
 
 
 def test_migration_preserves_all_rows(tmp_path):

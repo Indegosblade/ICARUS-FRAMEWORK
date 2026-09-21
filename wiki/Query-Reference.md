@@ -55,6 +55,10 @@ with IcarusQuery("intel.db") as q:
 
 ## Raw SQL
 
+The CLI requires exactly one query mode (`--sql`, `--search`, or `--stats`).
+Raw SQL runs on a read-only connection that rejects writes, `ATTACH`, and
+`DETACH`. Use `icarus exec` for deliberate database mutations.
+
 ```bash
 icarus query intel.db --sql "SELECT filename, size FROM files WHERE size > 100000000 ORDER BY size DESC LIMIT 10"
 ```
@@ -64,6 +68,10 @@ with IcarusQuery("intel.db") as q:
     results = q.execute("SELECT COUNT(*) as cnt, arch FROM binaries GROUP BY arch ORDER BY cnt DESC")
     print(results.to_markdown())
 ```
+
+Terminal/API query results retain at most 100 rows and report when additional
+rows were truncated. Add an SQL `LIMIT` when you need a smaller deterministic
+result window.
 
 ## Observation Queries
 

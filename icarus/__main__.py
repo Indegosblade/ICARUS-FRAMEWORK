@@ -17,6 +17,7 @@ def cmd_build(args):
     import os
     import uuid
 
+    from icarus.core.detection import DetectionBudgetExceeded
     from icarus.core.pipeline import create_default_pipeline
     from icarus.core.schema import open_db
     from icarus.parsers import detect_parser
@@ -28,7 +29,11 @@ def cmd_build(args):
 
     parser_name = args.parser
     if parser_name is None:
-        parser_name = detect_parser(source)
+        try:
+            parser_name = detect_parser(source)
+        except DetectionBudgetExceeded as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
         if parser_name is None:
             print(
                 "ERROR: Could not auto-detect source type. Specify --parser",
@@ -129,18 +134,15 @@ def cmd_query(args):
     # the explicit `icarus exec` command.
     try:
         with IcarusQuery(args.database) as q:
-            if args.search:
-                result = q.search(args.search, table=args.table)
-            elif args.sql:
+            if args.search is not None:
+                result = q.search(args.search, table=args.table or "files")
+            elif args.sql is not None:
                 result = q.execute(args.sql)
-            elif args.stats:
+            else:
                 stats = q.stats()
                 for table, count in stats.items():
                     print(f"{table}: {count:,}")
                 return
-            else:
-                print("Specify --sql, --search, or --stats", file=sys.stderr)
-                sys.exit(1)
             print(result.to_markdown())
     except sqlite3.OperationalError as e:
         msg = str(e).lower()
@@ -213,12 +215,11 @@ def cmd_diff(args):
             print(f"ERROR: {e}", file=sys.stderr)
             sys.exit(3)
         print(f"STIX bundle written to {args.stix} ({len(bundle['objects'])} objects)")
-        return
 
     from icarus.core.differ import IcarusDiffer
     with IcarusDiffer(args.old, args.new) as d:
         report = d.generate_report()
-        if args.output:
+        if getattr(args, "output", None):
             Path(args.output).write_text(report, encoding="utf-8")
             print(f"Report written to {args.output}")
         else:
@@ -377,10 +378,11 @@ def main():
     # query
     query_p = sub.add_parser("query", help="Query an intelligence database")
     query_p.add_argument("database", help="Path to ICARUS database")
-    query_p.add_argument("--sql", help="Raw SQL query")
-    query_p.add_argument("--search", help="Full-text search query")
-    query_p.add_argument("--table", default="files", help="Table for FTS search (default: files)")
-    query_p.add_argument("--stats", action="store_true", help="Show table row counts")
+    query_mode = query_p.add_mutually_exclusive_group(required=True)
+    query_mode.add_argument("--sql", help="Raw SQL query")
+    query_mode.add_argument("--search", help="Full-text search query")
+    query_mode.add_argument("--stats", action="store_true", help="Show table row counts")
+    query_p.add_argument("--table", help="Table for --search FTS (default: files)")
     query_p.add_argument(
         "--allow-unverified", action="store_true",
         help="Query even if the database failed sanitization or is unmarked "
@@ -437,6 +439,8 @@ def main():
     if not args.command:
         parser.print_help()
         sys.exit(1)
+    if args.command == "query" and args.table and args.search is None:
+        parser.error("--table requires --search")
 
     try:
         {"build": cmd_build, "query": cmd_query, "exec": cmd_exec, "diff": cmd_diff,

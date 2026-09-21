@@ -17,7 +17,11 @@ icarus build --source PATH --output PATH [--parser NAME] [--fresh] [--skip-hygei
 | `--skip-hygeia` | Skip PII sanitization (output contains raw data) |
 | `--resolve` | EXPERIMENTAL: run entity resolution (`resolve_scored`) as an in-build phase, after `verify` and before `sanitize` — see [`icarus resolve`](#icarus-resolve) below |
 
-**Auto-detection:** When `--parser` is omitted, the registry runs each parser's `identify()` method against the source. The parser with the lowest specificity level wins. If no specific parser matches, a generic fallback catches it.
+**Auto-detection:** When `--parser` is omitted, ICARUS walks the source once and
+shares a bounded sample with every detector: at most 5,000 entries and 4 MiB of
+file content. The parser with the lowest specificity level wins. If either
+sampling budget is exhausted, ICARUS refuses to guess and asks you to provide
+`--parser`; an explicit parser skips auto-detection entirely.
 
 **Examples:**
 ```bash
@@ -35,7 +39,7 @@ Query an intelligence database. **`query` is read-only** — the connection open
 refused (exit code 2) and steered to `icarus exec`. Use `exec` for writes.
 
 ```bash
-icarus query DATABASE [--sql QUERY] [--search TERMS] [--table TABLE] [--stats] [--allow-unverified]
+icarus query DATABASE (--sql QUERY | --search TERMS | --stats) [--table TABLE] [--allow-unverified]
 ```
 
 | Flag | Description |
@@ -46,6 +50,12 @@ icarus query DATABASE [--sql QUERY] [--search TERMS] [--table TABLE] [--stats] [
 | `--table` | Table for FTS search (default: files) |
 | `--stats` | Show table row counts |
 | `--allow-unverified` | Query a database whose sanitization failed or is unmarked. By default either is refused (exit code 3) because it may contain unsanitized data; a verified or `--skip-hygeia` database queries normally. |
+
+Exactly one of `--sql`, `--search`, or `--stats` is required. Query output is
+limited to 100 rows plus a truncation notice, so an unbounded `SELECT` does not
+materialize the entire result set. Read-only query connections also deny SQLite
+`ATTACH` and `DETACH`; use `icarus exec` only when you intentionally need to
+modify a database.
 
 **Examples:**
 ```bash
@@ -100,7 +110,11 @@ icarus diff OLD NEW [--output PATH] [--stix PATH] [--allow-unverified]
 icarus diff v1.db v2.db
 icarus diff v1.db v2.db -o changes.md
 icarus diff v1.db v2.db --stix bundle.json
+icarus diff v1.db v2.db -o changes.md --stix bundle.json
 ```
+
+`--output` and `--stix` are additive. Supplying both writes both artifacts;
+when `--output` is omitted, the Markdown report is printed to stdout.
 
 ---
 

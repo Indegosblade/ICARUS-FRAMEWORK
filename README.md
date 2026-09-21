@@ -117,8 +117,11 @@ icarus query intel.db --sql "SELECT path, size FROM files WHERE size > 100000000
 # Diff — compare two databases
 icarus diff v1.db v2.db -o report.md
 
-# Diff — export as STIX 2.1 bundle
+# Diff — export as STIX 2.1 bundle (the Markdown report still prints to stdout)
 icarus diff v1.db v2.db --stix bundle.json
+
+# Diff — write both the Markdown report and STIX bundle
+icarus diff v1.db v2.db -o report.md --stix bundle.json
 
 # Parsers — list, validate, test
 icarus parser list
@@ -226,7 +229,11 @@ full development guide.
 
 ### Built-in parsers
 
-9 parsers — 8 production, 1 candidate. Auto-detection runs each parser's `identify()` method against the source; the most specific match (lowest specificity number) wins.
+9 parsers — 8 production, 1 candidate. Auto-detection takes one deterministic,
+shared sample of at most 5,000 tree entries and 4 MiB of source bytes; built-in
+parsers inspect that sample, and the most specific match (lowest specificity
+number) wins. If either budget is exhausted, ICARUS refuses to guess and asks for
+an explicit `--parser` value.
 
 | Parser | Tier | Spec | Description |
 |--------|------|:----:|-------------|
@@ -252,7 +259,7 @@ See [about/PARSERS.md](about/PARSERS.md) for the parser development guide.
 
 ## Schema
 
-17 normalized tables, 3 FTS5 full-text indexes, 3 intelligence views. Schema version 6 with automatic migration from v2 through v5.
+17 normalized tables, 3 FTS5 full-text indexes, 3 intelligence views. Schema version 6 with automatic migration from v2 through v5. Compatible legacy databases are also repaired to restore missing indexes, FTS tables/triggers, and views; newly restored FTS indexes are rebuilt for existing rows.
 
 | Layer | Tables |
 |-------|--------|
@@ -277,7 +284,9 @@ See [wiki/Schema-Reference](wiki/Schema-Reference.md) for full column definition
 
 **Streaming extraction** — parsers process files and records individually with periodic batch commits. Format-specific read/decompression caps bound materialized input instead of loading an entire source tree. SQLite memory-mapped I/O and page cache scale to available system RAM automatically.
 
-**Source-boundary safety** — parser reads are regular-file-only and no-follow by default. Symlinks are cataloged from link metadata without opening their targets; FIFOs/devices/sockets are skipped with a warning; non-UTF-8 path bytes are escaped for safe SQLite storage. Recursive JSON failures are isolated, and compressed-tar listing stops at a 64 MiB decompressed-data budget.
+**Source-boundary safety** — parser reads are regular-file-only and no-follow by default. Symlinks are cataloged from link metadata without opening their targets; FIFOs/devices/sockets are skipped with a warning; non-UTF-8 path bytes are escaped for safe SQLite storage. Recursive JSON failures are isolated, compressed-tar listing stops at a 64 MiB decompressed-data budget, and ZIP metadata is checked before eager parsing (64 MiB archive, 8 MiB central directory, and 10,000-entry ceilings).
+
+**Bounded output** — read-only queries deny `ATTACH`/`DETACH` and retain at most 100 display rows plus a truncation marker. Markdown emitted from database values strips terminal-control sequences and escapes table-breaking characters before output.
 
 **Checkpoint/resume** — the pipeline saves progress after each phase. If it crashes at phase 4, it resumes from phase 4.
 

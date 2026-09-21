@@ -7,8 +7,8 @@ byte-for-byte unchanged afterwards. The adversarial vectors covered:
 
   * INSERT / UPDATE / DELETE   — ordinary DML writes to the main database
   * DROP TABLE / CREATE TABLE  — DDL / schema mutation
-  * ATTACH + write to attached — the reason ``PRAGMA query_only = ON`` matters
-                                 (``mode=ro`` alone only guards the MAIN file)
+  * ATTACH / DETACH — rejected by the authorizer before an attachment can create
+    a filesystem side effect
   * writable pragmas           — journal_mode / writable_schema cannot re-open
                                  a mutation path
 
@@ -20,6 +20,7 @@ clean message rather than a traceback.
 import json
 import sqlite3
 import types
+from pathlib import Path
 
 import pytest
 
@@ -117,6 +118,25 @@ def test_default_query_connection_reports_writable_false(tmp_path):
         assert q.execute("SELECT COUNT(*) FROM files").rows[0][0] == 1
 
 
+def test_query_fetch_is_bounded_and_reports_truncation(tmp_path):
+    db = _make_db(tmp_path)
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executemany(
+            "INSERT INTO files (path, filename) VALUES (?, ?)",
+            [(f"/row-{i}", f"row-{i}") for i in range(200)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    with IcarusQuery(str(db)) as q:
+        result = q.execute("SELECT path FROM files ORDER BY path")
+
+    assert len(result.rows) == 100
+    assert result.truncated is True
+    assert "Results truncated at 100 rows" in result.to_markdown()
+
 def test_insert_is_refused(tmp_path):
     db = _make_db(tmp_path)
     before = _count(db)
@@ -164,31 +184,42 @@ def test_create_table_is_refused(tmp_path):
     assert not _table_exists(db, "injected")
 
 
-# ── ATTACH: the reason query_only=ON is required ────────────────────────────
+# ── ATTACH / DETACH: no connection-level filesystem side effects ────────────
 
-def test_attach_and_write_to_attached_db_is_refused(tmp_path):
-    """mode=ro only guards the MAIN file; without PRAGMA query_only a write to
-    an ATTACHed (read-write) database would succeed. query_only blocks it."""
+def test_attach_nonexistent_database_is_refused_before_creation(tmp_path):
     db = _make_db(tmp_path)
-    side = tmp_path / "side.db"
-    sconn = sqlite3.connect(str(side))
-    sconn.execute("CREATE TABLE t (x INTEGER)")
-    sconn.commit()
-    sconn.close()
+    side = tmp_path / "must-not-exist.db"
 
     with IcarusQuery(str(db)) as q:
-        # ATTACH itself is a connection operation, permitted; opened read-write
-        # by default via a file: URI (the main connection has uri=True).
-        q.conn.execute(f"ATTACH DATABASE 'file:{side}' AS e")
-        with pytest.raises(sqlite3.OperationalError):
-            q.conn.execute("INSERT INTO e.t VALUES (1)")
-        q.conn.execute("DETACH DATABASE e")
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            q.execute("ATTACH DATABASE ? AS side", (str(side),))
+    assert not side.exists()
+    assert not Path(str(side) + "-wal").exists()
+    assert not Path(str(side) + "-shm").exists()
 
-    scheck = sqlite3.connect(str(side))
+
+def test_attach_existing_database_is_refused_without_modifying_it(tmp_path):
+    db = _make_db(tmp_path)
+    side = tmp_path / "existing.db"
+    sconn = sqlite3.connect(str(side))
     try:
-        assert scheck.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
+        sconn.execute("CREATE TABLE t (x INTEGER)")
+        sconn.commit()
     finally:
-        scheck.close()
+        sconn.close()
+    before = side.read_bytes()
+
+    with IcarusQuery(str(db)) as q:
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            q.execute("ATTACH DATABASE ? AS side", (str(side),))
+    assert side.read_bytes() == before
+
+
+def test_detach_is_refused_by_read_only_authorizer(tmp_path):
+    db = _make_db(tmp_path)
+    with IcarusQuery(str(db)) as q:
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            q.execute("DETACH DATABASE main")
 
 
 # ── writable pragmas cannot re-open a mutation path ─────────────────────────

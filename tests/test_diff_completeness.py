@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from icarus.core.differ import DiffCategory, DiffResult, IcarusDiffer, _md_sanitize
+from icarus.core.markdown import sanitize_markdown
 from icarus.core.schema import initialize_database
 
 
@@ -319,6 +320,15 @@ def test_md_sanitize_neutralizes_hostile_value():
     assert HOSTILE not in out
 
 
+@pytest.mark.parametrize(
+    "value",
+    ["pipe|cell", "tick`span", "carriage\rreturn", "line\nbreak", "tab\tstop",
+     "ansi\x1b[31mred", "nul\x00byte", r"literal\\slash", "c1\x85control"],
+)
+def test_query_and_diff_share_markdown_sanitization_policy(value):
+    assert sanitize_markdown(value) == _md_sanitize(value)
+
+
 def test_markdown_rejects_a_malformed_changed_record():
     result = DiffResult(
         added=[], removed=[], changed=[{"path": "/same"}],
@@ -368,3 +378,17 @@ def test_report_escaping_structural_description():
     assert "\x1b" not in md
     assert "`" not in md.split("Structural")[1]  # no raw backtick in the item
     assert HOSTILE not in md
+
+
+def test_report_escaping_database_filenames(tmp_path):
+    old, new = tmp_path / "old.db", tmp_path / "new.db"
+    initialize_database(old)
+    initialize_database(new)
+    with IcarusDiffer(str(old), str(new)) as d:
+        d.old_path = Path("old`name.db")
+        d.new_path = Path("new|name.db")
+        report = d.generate_report()
+    assert "old`name.db" not in report
+    assert "new|name.db" not in report
+    assert "old\\x60name.db" in report
+    assert "new\\|name.db" in report

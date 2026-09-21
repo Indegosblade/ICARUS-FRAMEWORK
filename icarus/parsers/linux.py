@@ -11,6 +11,7 @@ import struct
 from pathlib import Path
 from typing import Any, Dict
 
+from icarus.core.detection import DetectionEvidence
 from icarus.core.schema import open_db
 from icarus.parsers.base import BATCH_COMMIT_INTERVAL, BaseParser, link_daemons_to_binaries
 
@@ -46,6 +47,13 @@ class LinuxParser(BaseParser):
     def identify(self, source: Path) -> bool:
         markers = [source / "etc" / "passwd", source / "usr" / "bin", source / "lib" / "systemd"]
         return any(m.exists() for m in markers)
+
+    def identify_evidence(self, evidence: DetectionEvidence) -> bool:
+        return (
+            evidence.has_file("etc/passwd")
+            or evidence.has_directory("usr/bin")
+            or evidence.has_directory("lib/systemd")
+        )
 
     def get_required_tools(self) -> list:
         return ["readelf"]

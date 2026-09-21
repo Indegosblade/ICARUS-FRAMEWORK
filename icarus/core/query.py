@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from icarus.core import VALID_FTS_TABLES, VALID_TABLES
+from icarus.core.markdown import sanitize_markdown
 from icarus.core.schema import open_db
 
 QUERY_DISPLAY_LIMIT = 100
@@ -19,10 +20,18 @@ FTS_RESULT_LIMIT = 100
 class QueryResult:
     """Structured query result with metadata."""
 
-    def __init__(self, rows: List[tuple], columns: List[str], query_name: str = ""):
+    def __init__(
+        self,
+        rows: List[tuple],
+        columns: List[str],
+        query_name: str = "",
+        *,
+        truncated: bool = False,
+    ):
         self.rows = rows
         self.columns = columns
         self.query_name = query_name
+        self.truncated = truncated
 
     @property
     def count(self) -> int:
@@ -33,13 +42,15 @@ class QueryResult:
 
     def to_markdown(self) -> str:
         if not self.rows:
-            return f"*{self.query_name}: No results.*\n"
+            return f"*{sanitize_markdown(self.query_name)}: No results.*\n"
 
         lines = []
         if self.query_name:
-            lines.append(f"### {self.query_name} ({self.count} results)\n")
+            lines.append(
+                f"### {sanitize_markdown(self.query_name)} ({self.count} results)\n"
+            )
 
-        lines.append("| " + " | ".join(self.columns) + " |")
+        lines.append("| " + " | ".join(map(sanitize_markdown, self.columns)) + " |")
         lines.append("| " + " | ".join(["---"] * len(self.columns)) + " |")
 
         for row in self.rows[:QUERY_DISPLAY_LIMIT]:
@@ -48,10 +59,12 @@ class QueryResult:
                 s = str(v) if v is not None else ""
                 if len(s) > 60:
                     s = s[:57] + "..."
-                cells.append(s)
+                cells.append(sanitize_markdown(s))
             lines.append("| " + " | ".join(cells) + " |")
 
-        if self.count > QUERY_DISPLAY_LIMIT:
+        if self.truncated:
+            lines.append(f"\n*Results truncated at {QUERY_DISPLAY_LIMIT} rows.*")
+        elif self.count > QUERY_DISPLAY_LIMIT:
             lines.append(f"\n*... and {self.count - QUERY_DISPLAY_LIMIT} more rows.*")
 
         return "\n".join(lines)
@@ -86,18 +99,35 @@ class IcarusQuery:
             # connection, ATTACHed databases included.
             self.conn = open_db(self.db_path, readonly=True)
             self.conn.execute("PRAGMA query_only = ON")
+            self.conn.set_authorizer(self._read_only_authorizer)
         self.conn.row_factory = sqlite3.Row
+
+    @staticmethod
+    def _read_only_authorizer(
+        action_code: int,
+        _arg1: Optional[str],
+        _arg2: Optional[str],
+        _database: Optional[str],
+        _trigger: Optional[str],
+    ) -> int:
+        """Reject connection-level filesystem operations on query handles."""
+        if action_code in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
 
     def commit(self) -> None:
         """Commit pending changes (only meaningful on a writable connection)."""
         self.conn.commit()
 
     def execute(self, sql: str, params: tuple = ()) -> QueryResult:
-        """Execute raw SQL and return structured result."""
+        """Execute raw SQL with a bounded result set for terminal display."""
         cursor = self.conn.execute(sql, params)
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
-        rows = cursor.fetchall()
-        return QueryResult([tuple(r) for r in rows], columns)
+        rows = [tuple(row) for row in cursor.fetchmany(QUERY_DISPLAY_LIMIT + 1)]
+        truncated = len(rows) > QUERY_DISPLAY_LIMIT
+        if truncated:
+            rows.pop()
+        return QueryResult(rows, columns, truncated=truncated)
 
     def search(self, query: str, table: str = "files") -> QueryResult:
         """Full-text search via FTS5."""

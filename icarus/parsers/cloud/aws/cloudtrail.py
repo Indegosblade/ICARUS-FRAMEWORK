@@ -7,6 +7,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Dict
 
+from icarus.core.detection import DetectionEvidence
 from icarus.core.schema import open_db
 from icarus.parsers.base import BaseParser
 
@@ -66,6 +67,34 @@ class CloudTrailParser(BaseParser):
                         stacklevel=2,
                     )
                     continue
+        return False
+
+    def identify_evidence(self, evidence: DetectionEvidence) -> bool:
+        """Identify from the registry's bounded sample, never a second walk."""
+        for entry in evidence.files:
+            if (
+                not entry.relative.lower().endswith(".json")
+                or not 0 < entry.size <= _MAX_JSON_BYTES
+            ):
+                continue
+            raw = evidence.read_file(entry)
+            if raw is None:
+                continue
+            try:
+                data = json.loads(raw.decode(errors="replace"))
+                if not isinstance(data, dict) or "Records" not in data:
+                    continue
+                records = data["Records"]
+                if (
+                    isinstance(records, list)
+                    and records
+                    and isinstance(records[0], dict)
+                    and "eventVersion" in records[0]
+                    and "eventSource" in records[0]
+                ):
+                    return True
+            except (json.JSONDecodeError, UnicodeDecodeError, RecursionError, MemoryError):
+                continue
         return False
 
     def extract_entities(

@@ -6,6 +6,7 @@ import plistlib
 import sqlite3
 import sys
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -236,3 +237,82 @@ def test_compressed_tar_listing_stops_at_decompressed_budget(tmp_path, monkeypat
 
     with pytest.warns(RuntimeWarning, match="decompressed data exceeds"):
         assert _list_archive(archive) == []
+
+
+def test_zip_member_listing_stops_before_zipfile_for_entry_budget(tmp_path, monkeypatch):
+    """#89: a directory budget is checked before ZipFile builds ZipInfo rows."""
+    import icarus.parsers.generic.archive_parser as archive_module
+
+    archive = tmp_path / "many.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        for index in range(20):
+            zf.writestr(f"member-{index}", b"")
+    monkeypatch.setattr(archive_module, "MAX_ZIP_ENTRIES", 10)
+
+    def should_not_open(*_args, **_kwargs):
+        raise AssertionError("ZipFile must not materialize an over-budget directory")
+
+    monkeypatch.setattr(archive_module.zipfile, "ZipFile", should_not_open)
+    with pytest.warns(RuntimeWarning, match="entry count exceeds 10"):
+        assert _list_archive(archive) == []
+
+
+def test_zip_member_listing_accepts_budget_boundaries(tmp_path, monkeypatch):
+    import icarus.parsers.generic.archive_parser as archive_module
+
+    archive = tmp_path / "boundary.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("one.txt", b"one")
+    raw = archive.read_bytes()
+    eocd = raw.rfind(b"PK\x05\x06")
+    directory_size = int.from_bytes(raw[eocd + 12:eocd + 16], "little")
+    monkeypatch.setattr(archive_module, "MAX_ZIP_ARCHIVE_BYTES", len(raw))
+    monkeypatch.setattr(archive_module, "MAX_ZIP_CENTRAL_DIRECTORY_BYTES", directory_size)
+    monkeypatch.setattr(archive_module, "MAX_ZIP_ENTRIES", 1)
+
+    assert _list_archive(archive) == ["one.txt"]
+
+
+def test_zip64_member_listing_uses_valid_zip64_directory_metadata(tmp_path, monkeypatch):
+    """A valid ZIP64 directory remains listable when it fits every budget."""
+    archive = tmp_path / "zip64.zip"
+    monkeypatch.setattr(zipfile, "ZIP64_LIMIT", 1)
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("one.txt", b"one")
+    raw = bytearray(archive.read_bytes())
+    eocd = raw.rfind(b"PK\x05\x06")
+    # Force ZipFile to read the valid ZIP64 record written above, rather than
+    # the small-file copies retained in its conventional EOCD.
+    raw[eocd + 8:eocd + 20] = b"\xff" * 12
+    archive.write_bytes(raw)
+
+    assert _list_archive(archive) == ["one.txt"]
+
+
+def test_zip_forged_eocd_and_zip64_metadata_skip_before_zipfile(tmp_path, monkeypatch):
+    """Malformed and ZIP64 declarations fail closed without archive parsing."""
+    import icarus.parsers.generic.archive_parser as archive_module
+
+    def should_not_open(*_args, **_kwargs):
+        raise AssertionError("ZipFile must not open forged metadata")
+
+    monkeypatch.setattr(archive_module.zipfile, "ZipFile", should_not_open)
+    forged = tmp_path / "forged.zip"
+    # EOCD says ZIP64 is required, but provides no preceding ZIP64 locator.
+    forged.write_bytes(
+        b"PK\x05\x06" + b"\0" * 4 + b"\xff\xff" * 2 + b"\xff" * 8 + b"\0\0"
+    )
+    with pytest.warns(RuntimeWarning, match="ZIP64 locator"):
+        assert _list_archive(forged) == []
+
+    zip64 = tmp_path / "zip64-too-many.zip"
+    zip64_eocd = (
+        b"PK\x06\x06" + (44).to_bytes(8, "little") + b"-\0-\0"
+        + b"\0" * 8 + (10_001).to_bytes(8, "little") * 2
+        + b"\0" * 16
+    )
+    locator = b"PK\x06\x07" + b"\0" * 4 + b"\0" * 8 + b"\x01\0\0\0"
+    eocd = b"PK\x05\x06" + b"\0" * 4 + b"\xff" * 12 + b"\0\0"
+    zip64.write_bytes(zip64_eocd + locator + eocd)
+    with pytest.warns(RuntimeWarning, match="entry count exceeds"):
+        assert _list_archive(zip64) == []

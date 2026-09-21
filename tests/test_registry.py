@@ -3,6 +3,7 @@
 import json
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -219,3 +220,115 @@ def test_registry_rejects_manifest_parser_id_mismatch_without_mutating_state():
 
     with pytest.raises(ValueError, match="Unknown parser"):
         registry.get("implementation-name")
+
+
+def test_auto_detection_uses_one_shared_bounded_walk(tmp_path, monkeypatch):
+    """#95: generic candidates consume one registry-owned sample, not walks."""
+    import icarus.core.detection as detection
+    from icarus.parsers import detect_parser
+
+    (tmp_path / "data.json").write_text('{"key": "value"}')
+    calls = 0
+    real_walk = detection.os.walk
+
+    def counted_walk(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield from real_walk(*args, **kwargs)
+
+    monkeypatch.setattr(detection.os, "walk", counted_walk)
+    assert detect_parser(tmp_path) == "generic/json"
+    assert calls == 1
+
+
+def test_auto_detection_refuses_incomplete_entry_sample(tmp_path, monkeypatch):
+    import icarus.core.detection as detection
+    from icarus.parsers import detect_parser
+
+    for index in range(3):
+        (tmp_path / f"file-{index}.txt").write_text("x")
+    monkeypatch.setattr(detection, "DETECTION_ENTRY_BUDGET", 2)
+
+    with pytest.raises(detection.DetectionBudgetExceeded, match="specify --parser"):
+        detect_parser(tmp_path)
+
+
+def test_auto_detection_refuses_incomplete_byte_sample(tmp_path, monkeypatch):
+    import icarus.core.detection as detection
+    from icarus.parsers import detect_parser
+
+    (tmp_path / "trail.json").write_text(
+        '{"Records": [{"eventVersion": "1", "eventSource": "test"}]}'
+    )
+    monkeypatch.setattr(detection, "DETECTION_BYTE_BUDGET", 1)
+
+    with pytest.raises(detection.DetectionBudgetExceeded, match="specify --parser"):
+        detect_parser(tmp_path)
+
+
+def test_auto_detection_ignores_permission_denied_branches(tmp_path, monkeypatch):
+    import icarus.core.detection as detection
+    from icarus.parsers import detect_parser
+
+    (tmp_path / "data.json").write_text('{"key": "value"}')
+    real_walk = detection.os.walk
+
+    def walk_with_denied_branch(*args, **kwargs):
+        onerror = kwargs["onerror"]
+        onerror(PermissionError("denied branch"))
+        yield from real_walk(*args, **kwargs)
+
+    monkeypatch.setattr(detection.os, "walk", walk_with_denied_branch)
+    assert detect_parser(tmp_path) == "generic/json"
+
+
+def test_auto_detection_does_not_follow_symlinked_directories(tmp_path):
+    from icarus.parsers import detect_parser
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "only-outside.json").write_text('{"outside": true}')
+    source = tmp_path / "source"
+    source.mkdir()
+    link = source / "linked"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    assert detect_parser(source) is None
+
+
+def test_explicit_parser_bypasses_auto_detection_budget(tmp_path, monkeypatch):
+    """The CLI must not sample at all when the caller supplied --parser."""
+    import icarus.__main__ as cli
+    import icarus.core.pipeline as pipeline_module
+    import icarus.parsers as parsers
+    from icarus.core.detection import DetectionBudgetExceeded
+
+    source = tmp_path / "source"
+    source.mkdir()
+    output = tmp_path / "out.db"
+    called = []
+
+    class FakePipeline:
+        def has_resumable_checkpoint(self):
+            return False
+
+        def run(self, *, resume):
+            called.append(resume)
+
+    def should_not_detect(_source):
+        raise DetectionBudgetExceeded("sample exhausted")
+
+    monkeypatch.setattr(parsers, "detect_parser", should_not_detect)
+    monkeypatch.setattr(
+        pipeline_module, "create_default_pipeline", lambda **_kwargs: FakePipeline()
+    )
+    cli.cmd_build(
+        SimpleNamespace(
+            source=str(source), output=str(output), parser="generic/binary",
+            fresh=False, skip_hygeia=True, resolve=False,
+        )
+    )
+    assert called == [True]
