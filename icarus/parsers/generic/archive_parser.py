@@ -8,7 +8,7 @@ import tarfile
 import warnings
 import zipfile
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, BinaryIO, Dict
 
 from icarus.core.schema import open_db
 from icarus.parsers.base import BaseParser
@@ -17,6 +17,19 @@ from icarus.parsers.base import BaseParser
 # payloads. Stop after a bounded amount instead of turning cataloging into an
 # unbounded decompression operation.
 MAX_DECOMPRESSED_TAR_BYTES = 64 * 1024 * 1024
+
+# ``zipfile.ZipFile`` creates one ZipInfo object for every central-directory
+# entry while opening the file.  Validate these on-disk bounds first so a
+# member-listing request cannot amplify a small archive into unbounded heap.
+MAX_ZIP_ARCHIVE_BYTES = 64 * 1024 * 1024
+MAX_ZIP_CENTRAL_DIRECTORY_BYTES = 8 * 1024 * 1024
+MAX_ZIP_ENTRIES = 10_000
+_ZIP_EOCD_SIGNATURE = b"PK\x05\x06"
+_ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_ZIP64_EOCD_SIGNATURE = b"PK\x06\x06"
+_ZIP_EOCD_SIZE = 22
+_ZIP64_LOCATOR_SIZE = 20
+_ZIP64_EOCD_SIZE = 56
 
 
 class ArchiveParser(BaseParser):
@@ -105,8 +118,8 @@ def _list_archive(path: Path, limit: int = 50) -> list:
     """List up to ``limit`` members within bounded work/memory.
 
     Plain tar members are iterated lazily; compressed tar data is capped before
-    parsing; and the already-read ZIP central directory is sliced without a
-    second full name list.
+    parsing; ZIP metadata is checked before ``ZipFile`` can materialize its
+    central directory; and all returned name lists retain their output limit.
     """
     try:
         _, kind = BaseParser._file_kind(path)
@@ -114,6 +127,8 @@ def _list_archive(path: Path, limit: int = 50) -> list:
             return []
         if path.suffix.lower() == ".zip":
             with BaseParser._open_regular(path) as source:
+                _check_zip_listing_budget(source, path)
+                source.seek(0)
                 with zipfile.ZipFile(source) as zf:
                     return [
                         BaseParser._safe_text(info.filename)
@@ -158,3 +173,105 @@ def _list_archive(path: Path, limit: int = 50) -> list:
     ):
         pass
     return []
+
+
+def _check_zip_listing_budget(source: BinaryIO, path: Path) -> None:
+    """Reject unsafe ZIP directory metadata before constructing ``ZipFile``.
+
+    The stdlib eagerly parses central directories.  Only the trailing EOCD
+    (and, when required, its ZIP64 record) is read here; member data is never
+    extracted or inspected.
+    """
+    source.seek(0, os.SEEK_END)
+    archive_size = source.tell()
+    if archive_size > MAX_ZIP_ARCHIVE_BYTES:
+        _skip_zip_listing(path, "archive exceeds " f"{MAX_ZIP_ARCHIVE_BYTES} byte budget")
+
+    tail_size = min(archive_size, _ZIP_EOCD_SIZE + 65535)
+    source.seek(archive_size - tail_size)
+    tail = source.read(tail_size)
+    eocd_at = tail.rfind(_ZIP_EOCD_SIGNATURE)
+    if eocd_at < 0 or len(tail) - eocd_at < _ZIP_EOCD_SIZE:
+        _skip_zip_listing(path, "missing or truncated end-of-central-directory record")
+
+    eocd = tail[eocd_at:eocd_at + _ZIP_EOCD_SIZE]
+    comment_size = int.from_bytes(eocd[20:22], "little")
+    if eocd_at + _ZIP_EOCD_SIZE + comment_size != len(tail):
+        _skip_zip_listing(path, "malformed end-of-central-directory comment")
+    if eocd[4:8] != b"\0\0\0\0" or eocd[8:10] != eocd[10:12]:
+        _skip_zip_listing(path, "multi-disk or inconsistent entry metadata")
+    eocd_offset = archive_size - tail_size + eocd_at
+    entries = int.from_bytes(eocd[10:12], "little")
+    directory_size = int.from_bytes(eocd[12:16], "little")
+    directory_offset = int.from_bytes(eocd[16:20], "little")
+    needs_zip64 = (
+        entries == 0xFFFF
+        or directory_size == 0xFFFFFFFF
+        or directory_offset == 0xFFFFFFFF
+    )
+    if needs_zip64:
+        entries, directory_size, directory_offset, directory_start = _zip64_directory(
+            source, eocd_offset, path
+        )
+    else:
+        directory_start = eocd_offset - directory_size - directory_offset
+
+    if entries > MAX_ZIP_ENTRIES:
+        _skip_zip_listing(path, f"entry count exceeds {MAX_ZIP_ENTRIES} budget")
+    if directory_size > MAX_ZIP_CENTRAL_DIRECTORY_BYTES:
+        _skip_zip_listing(
+            path,
+            "central directory exceeds " f"{MAX_ZIP_CENTRAL_DIRECTORY_BYTES} byte budget",
+        )
+    directory_end = directory_start + directory_offset + directory_size
+    if (
+        directory_start < 0
+        or directory_offset < 0
+        or directory_end > eocd_offset
+    ):
+        _skip_zip_listing(path, "malformed central-directory bounds")
+
+
+def _zip64_directory(
+    source: BinaryIO, eocd_offset: int, path: Path
+) -> tuple[int, int, int, int]:
+    """Return ZIP64 entry/directory metadata, rejecting malformed records."""
+    if eocd_offset < _ZIP64_LOCATOR_SIZE:
+        _skip_zip_listing(path, "missing ZIP64 locator")
+    source.seek(eocd_offset - _ZIP64_LOCATOR_SIZE)
+    locator = source.read(_ZIP64_LOCATOR_SIZE)
+    if len(locator) != _ZIP64_LOCATOR_SIZE or locator[:4] != _ZIP64_LOCATOR_SIGNATURE:
+        _skip_zip_listing(path, "missing or malformed ZIP64 locator")
+    record_offset = int.from_bytes(locator[8:16], "little")
+    if locator[4:8] != b"\0\0\0\0" or locator[16:20] != b"\x01\0\0\0":
+        _skip_zip_listing(path, "multi-disk ZIP64 metadata")
+    source.seek(0, os.SEEK_END)
+    archive_size = source.tell()
+    if record_offset < 0 or record_offset + _ZIP64_EOCD_SIZE > archive_size:
+        _skip_zip_listing(path, "ZIP64 end-of-central-directory is out of bounds")
+    source.seek(record_offset)
+    record = source.read(_ZIP64_EOCD_SIZE)
+    if (
+        len(record) != _ZIP64_EOCD_SIZE
+        or record[:4] != _ZIP64_EOCD_SIGNATURE
+        or int.from_bytes(record[4:12], "little") < 44
+    ):
+        _skip_zip_listing(path, "malformed ZIP64 end-of-central-directory")
+    if record[16:24] != b"\0" * 8 or record[24:32] != record[32:40]:
+        _skip_zip_listing(path, "multi-disk or inconsistent ZIP64 entry metadata")
+    entries = int.from_bytes(record[32:40], "little")
+    directory_size = int.from_bytes(record[40:48], "little")
+    directory_offset = int.from_bytes(record[48:56], "little")
+    directory_start = record_offset - directory_size - directory_offset
+    return entries, directory_size, directory_offset, directory_start
+
+
+def _skip_zip_listing(path: Path, reason: str) -> None:
+    """Warn and stop member listing while preserving archive cataloging."""
+    warnings.warn(
+        "Skipping ZIP member listing "
+        f"({reason}): {BaseParser._safe_text(str(path))}",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    raise zipfile.BadZipFile(reason)
