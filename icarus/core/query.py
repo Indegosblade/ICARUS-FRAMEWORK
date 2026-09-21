@@ -94,7 +94,21 @@ class IcarusQuery:
             # connection, ATTACHed databases included.
             self.conn = open_db(self.db_path, readonly=True)
             self.conn.execute("PRAGMA query_only = ON")
+            self.conn.set_authorizer(self._read_only_authorizer)
         self.conn.row_factory = sqlite3.Row
+
+    @staticmethod
+    def _read_only_authorizer(
+        action_code: int,
+        _arg1: Optional[str],
+        _arg2: Optional[str],
+        _database: Optional[str],
+        _trigger: Optional[str],
+    ) -> int:
+        """Reject connection-level filesystem operations on query handles."""
+        if action_code in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
 
     def commit(self) -> None:
         """Commit pending changes (only meaningful on a writable connection)."""
