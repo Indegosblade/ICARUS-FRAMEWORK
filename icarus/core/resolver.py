@@ -20,6 +20,7 @@ docstring for details).
 """
 
 import json
+import math
 import warnings
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -73,29 +74,66 @@ class EntityResolver:
         self, entity_type: str, atom_ids: List[int], canonical_key: Optional[str] = None
     ) -> int:
         """Create a bag grouping one or more atoms. Returns bag_id."""
-        now = datetime.now(timezone.utc).isoformat()
-        cursor = self.conn.execute(
-            "INSERT INTO bags (entity_type, canonical_key, created_at, atom_count) "
-            "VALUES (?, ?, ?, ?)",
-            (entity_type, canonical_key, now, len(atom_ids)),
-        )
-        bag_id = cursor.lastrowid
-        assert bag_id is not None
-
-        for atom_id in atom_ids:
-            self.conn.execute(
-                "INSERT INTO bag_atoms (bag_id, atom_id) VALUES (?, ?)",
-                (bag_id, atom_id),
+        atom_ids = list(dict.fromkeys(atom_ids))
+        if not atom_ids:
+            raise ValueError("create_bag requires at least one atom ID")
+        placeholders = ",".join("?" for _ in atom_ids)
+        rows = self.conn.execute(
+            f"SELECT id, entity_type FROM atoms WHERE id IN ({placeholders})",  # nosec B608 - placeholders are generated from list length only
+            atom_ids,
+        ).fetchall()
+        found = {row[0]: row[1] for row in rows}
+        missing = [atom_id for atom_id in atom_ids if atom_id not in found]
+        if missing:
+            raise ValueError(f"Unknown atom IDs: {missing}")
+        mismatched = [atom_id for atom_id in atom_ids if found[atom_id] != entity_type]
+        if mismatched:
+            raise ValueError(
+                f"Atoms do not match entity type {entity_type!r}: {mismatched}"
+            )
+        assigned = self.conn.execute(
+            f"SELECT atom_id FROM bag_atoms WHERE atom_id IN ({placeholders})",  # nosec B608 - placeholders are generated from list length only
+            atom_ids,
+        ).fetchall()
+        if assigned:
+            raise ValueError(
+                f"Atoms already belong to a bag: {sorted(row[0] for row in assigned)}"
             )
 
-        self._log_event("create", bag_id, atom_ids, "initial bag creation")
-        self.conn.commit()
+        now = datetime.now(timezone.utc).isoformat()
+        with self.conn:
+            cursor = self.conn.execute(
+                "INSERT INTO bags (entity_type, canonical_key, created_at, atom_count) "
+                "VALUES (?, ?, ?, ?)",
+                (entity_type, canonical_key, now, len(atom_ids)),
+            )
+            bag_id = cursor.lastrowid
+            assert bag_id is not None
+
+            self.conn.executemany(
+                "INSERT INTO bag_atoms (bag_id, atom_id) VALUES (?, ?)",
+                [(bag_id, atom_id) for atom_id in atom_ids],
+            )
+            self._log_event("create", bag_id, atom_ids, "initial bag creation")
         return bag_id
 
     def merge_bags(self, bag_ids: List[int], reason: str = "") -> int:
         """Merge multiple bags into one. Logs BEFORE modifying. Returns surviving bag_id."""
+        bag_ids = list(dict.fromkeys(bag_ids))
         if len(bag_ids) < 2:
             raise ValueError("merge_bags requires at least 2 bag IDs")
+
+        placeholders = ",".join("?" for _ in bag_ids)
+        bags = self.conn.execute(
+            f"SELECT id, entity_type FROM bags WHERE id IN ({placeholders})",  # nosec B608 - placeholders are generated from list length only
+            bag_ids,
+        ).fetchall()
+        found = {row[0]: row[1] for row in bags}
+        missing = [bag_id for bag_id in bag_ids if bag_id not in found]
+        if missing:
+            raise ValueError(f"Unknown bag IDs: {missing}")
+        if len(set(found.values())) != 1:
+            raise ValueError("Cannot merge bags with different entity types")
 
         surviving_id = bag_ids[0]
 
@@ -106,74 +144,87 @@ class EntityResolver:
             ).fetchall()
             all_atom_ids.extend(r[0] for r in rows)
 
-        self._log_event("merge", surviving_id, all_atom_ids, reason)
+        with self.conn:
+            self._log_event("merge", surviving_id, all_atom_ids, reason)
 
-        for bag_id in bag_ids[1:]:
-            # bag_atoms has PRIMARY KEY(bag_id, atom_id): if the losing and
-            # surviving bags already share an atom, a plain
-            # "UPDATE ... SET bag_id" re-points that shared row onto a key
-            # that already exists under surviving_id and raises
-            # IntegrityError. INSERT OR IGNORE + delete-the-loser is safe
-            # either way — a shared atom simply collapses to the one row
-            # already present under surviving_id.
-            self.conn.execute(
-                "INSERT OR IGNORE INTO bag_atoms (bag_id, atom_id) "
-                "SELECT ?, atom_id FROM bag_atoms WHERE bag_id = ?",
-                (surviving_id, bag_id),
-            )
-            self.conn.execute(
-                "DELETE FROM bag_atoms WHERE bag_id = ?",
-                (bag_id,),
-            )
-            self.conn.execute(
-                "UPDATE resolution_event_log SET bag_id = ? WHERE bag_id = ?",
-                (surviving_id, bag_id),
-            )
-            self.conn.execute("DELETE FROM bags WHERE id = ?", (bag_id,))
+            for bag_id in bag_ids[1:]:
+                # bag_atoms has PRIMARY KEY(bag_id, atom_id): if the losing and
+                # surviving bags already share an atom, a plain
+                # "UPDATE ... SET bag_id" re-points that shared row onto a key
+                # that already exists under surviving_id and raises
+                # IntegrityError. INSERT OR IGNORE + delete-the-loser is safe
+                # either way — a shared atom simply collapses to the one row
+                # already present under surviving_id.
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO bag_atoms (bag_id, atom_id) "
+                    "SELECT ?, atom_id FROM bag_atoms WHERE bag_id = ?",
+                    (surviving_id, bag_id),
+                )
+                self.conn.execute(
+                    "DELETE FROM bag_atoms WHERE bag_id = ?",
+                    (bag_id,),
+                )
+                self.conn.execute(
+                    "UPDATE resolution_event_log SET bag_id = ? WHERE bag_id = ?",
+                    (surviving_id, bag_id),
+                )
+                self.conn.execute("DELETE FROM bags WHERE id = ?", (bag_id,))
 
-        total = self.conn.execute(
-            "SELECT COUNT(*) FROM bag_atoms WHERE bag_id = ?", (surviving_id,)
-        ).fetchone()[0]
-        self.conn.execute(
-            "UPDATE bags SET atom_count = ?, resolved_at = ? WHERE id = ?",
-            (total, datetime.now(timezone.utc).isoformat(), surviving_id),
-        )
-
-        self.conn.commit()
+            total = self.conn.execute(
+                "SELECT COUNT(*) FROM bag_atoms WHERE bag_id = ?", (surviving_id,)
+            ).fetchone()[0]
+            self.conn.execute(
+                "UPDATE bags SET atom_count = ?, resolved_at = ? WHERE id = ?",
+                (total, datetime.now(timezone.utc).isoformat(), surviving_id),
+            )
         return surviving_id
 
     def split_bag(self, bag_id: int, atom_ids_to_remove: List[int], reason: str = "") -> int:
         """Remove atoms from a bag into a new bag. Does NOT delete original. Returns new bag_id."""
+        atom_ids_to_remove = list(dict.fromkeys(atom_ids_to_remove))
+        if not atom_ids_to_remove:
+            raise ValueError("split_bag requires at least one atom ID")
         now = datetime.now(timezone.utc).isoformat()
 
-        self._log_event("split", bag_id, atom_ids_to_remove, reason)
-
-        entity_type = self.conn.execute(
+        bag = self.conn.execute(
             "SELECT entity_type FROM bags WHERE id = ?", (bag_id,)
-        ).fetchone()[0]
+        ).fetchone()
+        if bag is None:
+            raise ValueError(f"Unknown bag ID: {bag_id}")
+        members = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT atom_id FROM bag_atoms WHERE bag_id = ?", (bag_id,)
+            ).fetchall()
+        }
+        requested = set(atom_ids_to_remove)
+        missing = sorted(requested - members)
+        if missing:
+            raise ValueError(f"Atoms are not members of bag {bag_id}: {missing}")
+        if requested == members:
+            raise ValueError("split_bag cannot remove every atom from the original bag")
 
-        cursor = self.conn.execute(
-            "INSERT INTO bags (entity_type, created_at, atom_count) VALUES (?, ?, ?)",
-            (entity_type, now, len(atom_ids_to_remove)),
-        )
-        new_bag_id = cursor.lastrowid
-        assert new_bag_id is not None
+        with self.conn:
+            self._log_event("split", bag_id, atom_ids_to_remove, reason)
+            cursor = self.conn.execute(
+                "INSERT INTO bags (entity_type, created_at, atom_count) VALUES (?, ?, ?)",
+                (bag[0], now, len(atom_ids_to_remove)),
+            )
+            new_bag_id = cursor.lastrowid
+            assert new_bag_id is not None
 
-        for atom_id in atom_ids_to_remove:
+            placeholders = ",".join("?" for _ in atom_ids_to_remove)
             self.conn.execute(
-                "UPDATE bag_atoms SET bag_id = ? WHERE bag_id = ? AND atom_id = ?",
-                (new_bag_id, bag_id, atom_id),
+                f"UPDATE bag_atoms SET bag_id = ? "  # nosec B608 - placeholders are generated from list length only
+                f"WHERE bag_id = ? AND atom_id IN ({placeholders})",
+                [new_bag_id, bag_id, *atom_ids_to_remove],
             )
 
-        remaining = self.conn.execute(
-            "SELECT COUNT(*) FROM bag_atoms WHERE bag_id = ?", (bag_id,)
-        ).fetchone()[0]
-        self.conn.execute(
-            "UPDATE bags SET atom_count = ?, resolved_at = ? WHERE id = ?",
-            (remaining, now, bag_id),
-        )
-
-        self.conn.commit()
+            remaining = len(members) - len(requested)
+            self.conn.execute(
+                "UPDATE bags SET atom_count = ?, resolved_at = ? WHERE id = ?",
+                (remaining, now, bag_id),
+            )
         return new_bag_id
 
     def resolve(
@@ -266,6 +317,8 @@ class EntityResolver:
         match edges above ``threshold``, and ``N`` the number of atoms that
         were unresolved when the call started.
         """
+        if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+            raise ValueError("threshold must be between 0.0 and 1.0")
         unresolved = set(self.unresolved_atoms(entity_type))
         if not unresolved:
             return {"clusters": 0, "merges": 0, "atoms_resolved": 0}

@@ -722,9 +722,16 @@ def test_merge_bags_shared_atom_does_not_raise(tmp_db):
         a1 = r.ingest_atom(1, "files", "k1", {"x": 1})
         a2 = r.ingest_atom(1, "files", "k2", {"x": 2})
         a3 = r.ingest_atom(1, "files", "k3", {"x": 3})
-        # a2 is deliberately placed in BOTH bags before merging.
+        # create_bag rejects multi-bag membership. Simulate a legacy/corrupt
+        # database that predates that validation so merge_bags remains robust
+        # when repairing an overlap already present on disk.
         b1 = r.create_bag("files", [a1, a2])
-        b2 = r.create_bag("files", [a2, a3])
+        b2 = r.create_bag("files", [a3])
+        r.conn.execute(
+            "INSERT INTO bag_atoms (bag_id, atom_id) VALUES (?, ?)", (b2, a2)
+        )
+        r.conn.execute("UPDATE bags SET atom_count = 2 WHERE id = ?", (b2,))
+        r.conn.commit()
 
         surviving = r.merge_bags([b1, b2], reason="shared atom")
         assert surviving == b1
