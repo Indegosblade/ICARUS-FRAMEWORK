@@ -41,12 +41,12 @@ icarus = "icarus.__main__:main"
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0",
-    "pytest-cov>=4.0",
-    "ruff>=0.4",
-    "mypy>=1.8",
-    "bandit>=1.7",
-    "build>=1.0",
+    "pytest==9.2.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.17.3",
+    "mypy==2.4.0",
+    "bandit==1.9.4",
+    "build==1.6.1",
     "stix2>=3.0.1,<4",
 ]
 
@@ -62,15 +62,10 @@ python_version = "3.12"
 warn_unused_configs = true
 ignore_missing_imports = true
 disallow_untyped_defs = false
-check_untyped_defs = false
+check_untyped_defs = true
+# Private plugins are local extensions, excluded from public distributions and CI.
+exclude = ['icarus[/\\]parsers[/\\]private[/\\]']
 no_implicit_optional = true
-# Pared to the codes that currently fire on pre-existing (untyped-def) code
-# outside this pass's scope: operator/index/attr-defined in hygeia.py and
-# schema.py's Windows-only ctypes.windll access, var-annotated in
-# resolver.py/pipeline.py collection literals. "assignment" was dropped —
-# a full run with disable_error_code=[] surfaces zero [assignment] errors,
-# so it was suppressing nothing.
-disable_error_code = ["operator", "attr-defined", "var-annotated", "index"]
 
 [tool.bandit]
 exclude_dirs = ["tests"]
@@ -82,6 +77,7 @@ skips = ["B101", "B110", "B112", "B404", "B603", "B607"]
 
 [tool.setuptools.packages.find]
 include = ["icarus*"]
+exclude = ["icarus.parsers.private", "icarus.parsers.private.*"]
 
 [tool.setuptools.package-data]
 # Parser manifests, the manifest JSON Schema, and the parser catalogs are runtime

@@ -239,7 +239,7 @@ an explicit `--parser` value.
 |--------|------|:----:|-------------|
 | `cloud/aws/cloudtrail` | production | 5 | AWS CloudTrail JSON audit logs — IAM identities, API events, error patterns |
 | `macos` | candidate | 8 | macOS / iOS root filesystem — launchd daemons, Mach services, entitlements, kexts, frameworks |
-| `windows` | production | 20 | Windows directories — PE/DLL binaries, services, frameworks, file metadata |
+| `windows` | production | 20 | Windows directories — PE/DLL binaries, shared libraries, file metadata |
 | `linux` | production | 20 | Linux rootfs — ELF binaries, systemd units, shared libraries, capabilities |
 | `generic/json` | production | 100 | JSON file catalog with top-level key extraction |
 | `generic/xml` | production | 100 | XML file catalog |
@@ -288,7 +288,12 @@ See [wiki/Schema-Reference](wiki/Schema-Reference.md) for full column definition
 
 **Bounded output** — read-only queries deny `ATTACH`/`DETACH` and retain at most 100 display rows plus a truncation marker. Markdown emitted from database values strips terminal-control sequences and escapes table-breaking characters before output.
 
-**Checkpoint/resume** — the pipeline saves progress after each phase. If it crashes at phase 4, it resumes from phase 4.
+**Checkpoint/resume** — the pipeline saves progress after each phase. Linux and
+Windows filesystem ingestion also commit a directory frontier and filename cursor
+with extracted rows and their provenance, so a crash resumes from the last
+committed batch without hashing completed files again. Keep the source immutable
+and run one build per output database. Other parsers restart the interrupted phase.
+See [docs/INGEST_RECOVERY.md](docs/INGEST_RECOVERY.md) for the recovery contract.
 
 **Two-graph model** — a single database holds an ontology graph (entities and relationships, structural) and an event graph (observations and resolution decisions, temporal). Cross-graph joins connect them.
 
@@ -409,7 +414,7 @@ icarus-framework/
 │   └── integrations/
 │       ├── hygeia.py             PII sanitization
 │       └── stix_export.py        STIX 2.1 export
-├── tests/                        325 tests
+├── tests/                        Regression suite
 ├── examples/                     Custom parser template
 ├── schema/                       Standalone SQL reference
 ├── about/                        Architecture and parser docs

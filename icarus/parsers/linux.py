@@ -5,7 +5,6 @@ Single-walk extraction: catalogs files, detects ELF binaries in standard paths,
 parses systemd units, and inventories shared libraries.
 """
 
-import os
 import re
 import struct
 from pathlib import Path
@@ -13,7 +12,8 @@ from typing import Any, Dict
 
 from icarus.core.detection import DetectionEvidence
 from icarus.core.schema import open_db
-from icarus.parsers.base import BATCH_COMMIT_INTERVAL, BaseParser, link_daemons_to_binaries
+from icarus.parsers.base import BaseParser, link_daemons_to_binaries
+from icarus.parsers.progress import IngestProgress
 
 ELF_MAGIC = b"\x7fELF"
 ELF_ARCH = {0x03: "x86", 0x3E: "x86_64", 0xB7: "aarch64", 0x28: "arm", 0xF3: "riscv"}
@@ -59,90 +59,90 @@ class LinuxParser(BaseParser):
         return ["readelf"]
 
     def extract_entities(self, source: Path, db_path: Path) -> Dict[str, Any]:
+        source = Path(source).resolve()
         conn = open_db(db_path)
         stats = {"files": 0, "binaries": 0, "daemons": 0, "frameworks": 0}
         try:
-            for dirpath, _, filenames in os.walk(source, onerror=lambda e: None):
-                try:
-                    rel_dir = str(Path(dirpath).relative_to(source)).replace("\\", "/")
-                except ValueError:
-                    continue
-                in_bin = _match_dir(rel_dir, BIN_DIRS)
-                in_lib = _match_dir(rel_dir, LIB_DIRS)
-                is_systemd = rel_dir in SYSTEMD_UNIT_DIRS
-
-                for fname in filenames:
-                    path = Path(dirpath) / fname
-                    try:
-                        st, kind = self._file_kind(path)
-                        if st is None or kind in ("special", "unreadable"):
-                            continue
-                        ext = path.suffix.lower()
-                        rel = self._rel_path(path, source)
-                        filename = self._safe_text(path.name)
-                        is_link = kind == "symlink"
-                        file_type = "symlink" if is_link else FILE_TYPES.get(ext, "other")
-
-                        conn.execute(
-                            "INSERT OR IGNORE INTO files "
-                            "(path,filename,extension,size,sha256,file_type,"
-                            "is_symlink,symlink_target) VALUES (?,?,?,?,?,?,?,?)",
-                            (rel, filename, ext or None, st.st_size,
-                             self._safe_hash(path, st.st_size),
-                             file_type, int(is_link), self._symlink_target(path)),
-                        )
-                        stats["files"] += 1
-
-                        if is_link:
-                            if stats["files"] % BATCH_COMMIT_INTERVAL == 0:
-                                conn.commit()
-                            continue
-
-                        if in_bin and self._check_magic(path, ELF_MAGIC):
-                            row = conn.execute(
-                                "SELECT id FROM files WHERE path=?", (rel,)
-                            ).fetchone()
-                            if row:
-                                existing = conn.execute(
-                                    "SELECT id FROM binaries WHERE file_id=?",
-                                    (row[0],),
-                                ).fetchone()
-                                if not existing:
-                                    conn.execute(
-                                        "INSERT INTO binaries "
-                                        "(file_id,executable_name,arch) VALUES (?,?,?)",
-                                        (row[0], filename, _detect_elf_arch(path)),
-                                    )
-                                    stats["binaries"] += 1
-
-                        if is_systemd and ext == ".service":
-                            cur = conn.execute(
-                                "INSERT OR IGNORE INTO daemons "
-                                "(label,plist_path,program) VALUES (?,?,?)",
-                                (
-                                    self._safe_text(path.stem),
-                                    rel.lstrip("/"),
-                                    _parse_execstart(path),
-                                ),
-                            )
-                            if cur.rowcount:
-                                stats["daemons"] += 1
-
-                        if in_lib and ".so" in fname and self._check_magic(path, ELF_MAGIC):
-                            cur = conn.execute(
-                                "INSERT OR IGNORE INTO frameworks "
-                                "(name,path,is_private) VALUES (?,?,0)",
-                                (filename, rel),
-                            )
-                            if cur.rowcount:
-                                stats["frameworks"] += 1
-                    except (PermissionError, OSError):
-                        continue
-                    if stats["files"] % BATCH_COMMIT_INTERVAL == 0:
-                        conn.commit()
-            conn.commit()
+            with IngestProgress(conn, source, self.name, stats) as progress:
+                return self._extract_walk(conn, source, stats, progress)
         finally:
             conn.close()
+
+    def _extract_walk(self, conn, source, stats, progress):
+        for dirpath, filenames in progress.walk():
+            try:
+                rel_dir = str(Path(dirpath).relative_to(source)).replace("\\", "/")
+            except ValueError:
+                continue
+            in_bin = _match_dir(rel_dir, BIN_DIRS)
+            in_lib = _match_dir(rel_dir, LIB_DIRS)
+            is_systemd = rel_dir in SYSTEMD_UNIT_DIRS
+
+            for fname in filenames:
+                path = Path(dirpath) / fname
+                try:
+                    st, kind = self._file_kind(path)
+                    if st is None or kind in ("special", "unreadable"):
+                        continue
+                    ext = path.suffix.lower()
+                    rel = self._rel_path(path, source)
+                    filename = self._safe_text(path.name)
+                    is_link = kind == "symlink"
+                    file_type = "symlink" if is_link else FILE_TYPES.get(ext, "other")
+
+                    conn.execute(
+                        "INSERT OR IGNORE INTO files "
+                        "(path,filename,extension,size,sha256,file_type,"
+                        "is_symlink,symlink_target) VALUES (?,?,?,?,?,?,?,?)",
+                        (rel, filename, ext or None, st.st_size,
+                         self._safe_hash(path, st.st_size),
+                         file_type, int(is_link), self._symlink_target(path)),
+                    )
+                    stats["files"] += 1
+
+                    if is_link:
+                        continue
+
+                    if in_bin and self._check_magic(path, ELF_MAGIC):
+                        row = conn.execute(
+                            "SELECT id FROM files WHERE path=?", (rel,)
+                        ).fetchone()
+                        if row:
+                            existing = conn.execute(
+                                "SELECT id FROM binaries WHERE file_id=?",
+                                (row[0],),
+                            ).fetchone()
+                            if not existing:
+                                conn.execute(
+                                    "INSERT INTO binaries "
+                                    "(file_id,executable_name,arch) VALUES (?,?,?)",
+                                    (row[0], filename, _detect_elf_arch(path)),
+                                )
+                                stats["binaries"] += 1
+
+                    if is_systemd and ext == ".service":
+                        cur = conn.execute(
+                            "INSERT OR IGNORE INTO daemons "
+                            "(label,plist_path,program) VALUES (?,?,?)",
+                            (
+                                self._safe_text(path.stem),
+                                rel.lstrip("/"),
+                                _parse_execstart(path),
+                            ),
+                        )
+                        if cur.rowcount:
+                            stats["daemons"] += 1
+
+                    if in_lib and ".so" in fname and self._check_magic(path, ELF_MAGIC):
+                        cur = conn.execute(
+                            "INSERT OR IGNORE INTO frameworks "
+                            "(name,path,is_private) VALUES (?,?,0)",
+                            (filename, rel),
+                        )
+                        if cur.rowcount:
+                            stats["frameworks"] += 1
+                except (PermissionError, OSError):
+                    continue
         return stats
 
     def extract_relationships(self, source: Path, db_path: Path) -> Dict[str, Any]:

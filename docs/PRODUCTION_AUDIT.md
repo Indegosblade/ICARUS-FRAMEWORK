@@ -273,19 +273,29 @@ Severity is the verifier's adjusted severity. `line` numbers reference the audit
 
 ---
 
-## Remaining Open Backlog (2 open + 1 partial)
+## Historical backlog and current follow-up
 
-Everything else raised and verified real is now fixed. Two findings remain fully deferred and #93 is partially addressed (the daemon→binary edge is done; broader relationship coverage remains). Each remaining item requires a design decision or a larger scope than a targeted fix, rather than a mechanical change:
+This section records the original audit backlog. It is not a current completeness
+claim. The October 2026 production pass also found source-identity, mutation-history,
+build-ownership, and distribution-boundary problems; see issues #102, #103 and #106.
+The source-neutral ontology design is tracked in #105.
 
 ### ◧ partially fixed — extract_relationships was a no-op in most parsers; relationship-backed view was always empty
 - **Where:** `icarus/parsers/linux.py:111`  ·  _parsers_
-- **Status:** Done for the daemon→binary edge (PR #10): a shared `link_daemons_to_binaries()` helper lives in `base.py`; `linux.py` now parses `ExecStart=` to populate `daemons.program` and links to the matching binary, and macOS was refactored onto the same helper — so the sandbox-escape-surface view is no longer always empty. **Remaining:** other relationship types (binaries↔entitlements, sandbox profiles↔rules) and deciding whether the genuinely relationship-free parsers should drop the phase instead of returning a hardcoded `{"linked": 0}`.
+- **Status:** Daemon-to-binary links exist for Linux/macOS. macOS entitlements
+  already reference their owning binary during extraction; that edge is not an
+  outstanding no-op. Sandbox profiles are cataloged, but SBPL rule parsing and
+  broader relationship semantics require explicit parser support and validation.
 
 ### ◻️ open — macOS/Apple ontology reused with wrong semantics by cross-platform parsers
 - **Where:** `icarus/parsers/windows.py:21`  ·  _api-design_
-- **Why deferred:** Fixing this properly means either renaming the ontology to source-neutral concepts or adding a platform discriminator column — a schema-shape decision (likely a v6 migration) deliberately left for a dedicated pass rather than folded into this one.
+- **Current follow-up:** Issue #105 requires a source-neutral model and compatibility
+  plan. Schema v6 already exists; a future shape change needs a new version.
 
-### ◻️ open — mypy config disables body-checking and 5 core error codes, making the 'type' gate a near no-op
+### ✅ fixed — mypy skipped function bodies and disabled broad error classes
 - **Where:** `pyproject.toml:65`  ·  _testing-ci_
-- **Why deferred:** `no_implicit_optional` is now enabled and the `disable_error_code` list was pared from 5 entries to 4 (`assignment` was dropped — a full run with an empty list surfaced zero `[assignment]` errors, so it was suppressing nothing). `check_untyped_defs` and `disallow_untyped_defs` remain `false`; per the accompanying pyproject.toml comment, turning those on is explicitly "outside this pass's scope" — it requires annotating the untyped-def bodies the mypy config currently skips, which is a larger, separate cleanup.
+- **Current status:** `check_untyped_defs = true`, no blanket disabled error codes,
+  and explicit collection annotations in the public implementation. Local private
+  plugins are outside the public distribution/type-check gate. Requiring annotations
+  on every public function remains a separate API-quality increment.
 

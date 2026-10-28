@@ -8,6 +8,7 @@ and ``icarus parser validate`` raised FileNotFoundError on the schema, while CI 
 green because it installs the project editable (files present on disk in the source
 tree). These tests build the real artifacts and assert the data is present.
 """
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -42,7 +43,7 @@ SELFTEST_ROOT = REPO_ROOT / "icarus" / "parsers" / "selftest"
 EXPECTED_SELFTEST = {
     path.relative_to(REPO_ROOT).as_posix()
     for path in SELFTEST_ROOT.rglob("*")
-    if path.is_file()
+    if path.is_file() and "__pycache__" not in path.parts
 }
 
 
@@ -55,6 +56,22 @@ def built_dists(tmp_path_factory):
     # isolation so the declared PEP 517 backend requirements are installed on every
     # runner; setup-python does not guarantee setuptools is present in the test env.
     out = tmp_path_factory.mktemp("dist")
+    # Exercise exclusion even on CI, where local-only plugins are absent. Build
+    # from a disposable tree containing a synthetic private package; never copy
+    # the developer's real private parsers into temporary release artifacts.
+    source = tmp_path_factory.mktemp("package-source") / "icarus-framework"
+    shutil.copytree(
+        REPO_ROOT, source,
+        ignore=shutil.ignore_patterns(
+            ".git", ".venv", "venv", "env", "build", "dist", "*.egg-info",
+            "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+            "private", "prompts", "rootfs", "extracted", "reports", "output",
+        ),
+    )
+    private = source / "icarus" / "parsers" / "private"
+    private.mkdir()
+    (private / "__init__.py").write_text("# synthetic local-only package\n")
+    (private / "sentinel.yaml").write_text("private: synthetic-only\n")
     try:
         proc = subprocess.run(
             [
@@ -63,9 +80,9 @@ def built_dists(tmp_path_factory):
                 "build",
                 "--outdir",
                 str(out),
-                str(REPO_ROOT),
+                str(source),
             ],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=300,
         )
     except FileNotFoundError as exc:  # interpreter cannot run `-m build`
         pytest.fail(f"could not invoke `python -m build`: {exc}")
@@ -82,9 +99,14 @@ def built_dists(tmp_path_factory):
 
 def test_wheel_ships_parser_runtime_data(built_dists):
     whl, _ = built_dists
-    names = set(zipfile.ZipFile(whl).namelist())
+    with zipfile.ZipFile(whl) as archive:
+        names = set(archive.namelist())
     missing = (EXPECTED | EXPECTED_SELFTEST) - names
     assert not missing, f"wheel is missing runtime data files: {sorted(missing)}"
+    assert not any(name.startswith("icarus/parsers/private/") for name in names), (
+        "wheel contains local-only private parser files"
+    )
+    assert not any("__pycache__/" in name or name.endswith(".pyc") for name in names)
 
 
 def test_sdist_ships_parser_runtime_data(built_dists):
@@ -94,29 +116,43 @@ def test_sdist_ships_parser_runtime_data(built_dists):
         names = {"/".join(n.split("/")[1:]) for n in tf.getnames()}
     missing = (EXPECTED | EXPECTED_SELFTEST) - names
     assert not missing, f"sdist is missing runtime data files: {sorted(missing)}"
+    assert not any(name.startswith("icarus/parsers/private/") for name in names), (
+        "sdist contains local-only private parser files"
+    )
+    assert not any("__pycache__/" in name or name.endswith(".pyc") for name in names)
 
 
 def test_wheel_installed_parser_test_runs_outside_checkout(built_dists, tmp_path):
     """The advertised self-test must use wheel data, not the repository tests tree."""
     whl, _ = built_dists
     env_dir = tmp_path / "venv"
-    venv.EnvBuilder(with_pip=True, system_site_packages=True).create(env_dir)
+    # Runtime dependencies must come from the wheel's metadata. Inheriting the
+    # developer environment can hide an undeclared dependency or a stale HYGEIA.
+    venv.EnvBuilder(with_pip=True).create(env_dir)
     python = env_dir / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
 
     install = subprocess.run(
-        [str(python), "-m", "pip", "install", "--no-deps", str(whl)],
+        [str(python), "-m", "pip", "install", str(whl)],
         capture_output=True,
         text=True,
+        timeout=300,
     )
     assert install.returncode == 0, install.stderr
 
     outside_checkout = tmp_path / "outside-checkout"
     outside_checkout.mkdir()
-    proc = subprocess.run(
-        [str(python), "-I", "-m", "icarus", "parser", "test", "windows"],
-        cwd=outside_checkout,
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 0, f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
-    assert proc.stdout.count("[PASS]") == 4
+    for parser in (
+        "windows", "linux", "macos", "cloud/aws/cloudtrail", "generic/json",
+        "generic/xml", "generic/sqlite", "generic/archive", "generic/binary",
+    ):
+        proc = subprocess.run(
+            [str(python), "-I", "-m", "icarus", "parser", "test", parser],
+            cwd=outside_checkout,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, (
+            f"{parser}: STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+        assert proc.stdout.count("[PASS]") == 4, f"{parser}: {proc.stdout}"

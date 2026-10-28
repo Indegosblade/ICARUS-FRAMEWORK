@@ -18,7 +18,12 @@ from typing import Any, Dict, List
 try:
     from hygeia.patterns import PatternRegistry, get_default_registry
     from hygeia.sqlite_sanitizer import sanitize_database_generic
-    from hygeia.verifier import _is_false_positive as _hygeia_is_false_positive
+    try:
+        from hygeia.verifier import is_false_positive as _hygeia_is_false_positive
+    except ImportError:
+        # Compatibility with the currently pinned HYGEIA 3.14 API. Newer
+        # HYGEIA releases expose this policy helper as a supported public API.
+        from hygeia.verifier import _is_false_positive as _hygeia_is_false_positive
 
     _HAS_HYGEIA_PACKAGE = True
 except ImportError:
@@ -360,7 +365,7 @@ def _scan_database(db_path: Path, registry, fingerprint_key: bytes) -> Dict[str,
         raise SanitizationError("Sanitization target is not an existing database file")
 
     conn = sqlite3.connect(str(db_path))
-    findings = []
+    findings: list[dict[str, Any]] = []
     pattern_counts: Dict[str, int] = {}
     checked_rows = 0
     total_findings = 0
@@ -536,7 +541,7 @@ def sanitization_status(db_path: Path, *, immutable: bool = False) -> str:
     if not path.exists():
         return "unknown"
     try:
-        uri = f"file:{path}?mode=ro"
+        uri = path.resolve().as_uri() + "?mode=ro"
         if immutable:
             uri += "&immutable=1"
         conn = sqlite3.connect(uri, uri=True)

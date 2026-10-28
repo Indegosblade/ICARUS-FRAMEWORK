@@ -17,6 +17,7 @@ Covers:
 import json
 import sqlite3
 import tempfile
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -87,14 +88,14 @@ def test_atomize_basic(db_path):
             "binaries": 2, "daemons": 1, "frameworks": 0, "kexts": 0, "files": 2,
         }
 
-        # A binary atom is keyed by executable_name and carries the joined props.
+        # A binary atom is keyed by source path; name remains a matching feature.
         row = conn.execute(
             "SELECT entity_type, source_key, properties FROM atoms "
-            "WHERE entity_type = 'binaries' AND source_key = 'foo'"
+            "WHERE entity_type = 'binaries' AND source_key = 'path:/usr/bin/foo'"
         ).fetchone()
         assert row is not None
         assert row[0] == "binaries"
-        assert row[1] == "foo"
+        assert row[1] == "path:/usr/bin/foo"
         assert json.loads(row[2]) == {
             "executable_name": "foo",
             "arch": "arm64",
@@ -120,7 +121,7 @@ def test_atomize_basic(db_path):
                 "SELECT source_key FROM atoms_fts WHERE atoms_fts MATCH 'foo'"
             ).fetchall()
         }
-        assert "foo" in fts_keys
+        assert "path:/usr/bin/foo" in fts_keys
     finally:
         conn.close()
 
@@ -142,7 +143,7 @@ def test_atomize_omits_null_columns_from_properties(db_path):
         assert counts == {"binaries": 1}
         props = json.loads(
             conn.execute(
-                "SELECT properties FROM atoms WHERE source_key = 'lonely'"
+                "SELECT properties FROM atoms WHERE source_key = 'row:1'"
             ).fetchone()[0]
         )
         assert props == {"executable_name": "lonely"}
@@ -230,6 +231,64 @@ def test_atomize_cross_source_tagging(db_path):
 
 
 # ── schema v6 ─────────────────────────────────────────────────────────────
+
+
+def test_atomize_keeps_same_named_binaries_at_distinct_paths(db_path):
+    """An executable name is a matching feature, not a source-local identity."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        version_id = _insert_version(conn, "duplicate-binary-names")
+        for path, digest in (("/usr/bin/tool", "aaa"), ("/opt/vendor/tool", "bbb")):
+            file_id = conn.execute(
+                "INSERT INTO files (path, filename, sha256) VALUES (?, 'tool', ?)",
+                (path, digest),
+            ).lastrowid
+            conn.execute(
+                "INSERT INTO binaries (file_id, executable_name) VALUES (?, 'tool')",
+                (file_id,),
+            )
+        conn.commit()
+
+        assert atomize_db(conn, conn, version_id, ["binaries"]) == {"binaries": 2}
+        rows = conn.execute(
+            "SELECT source_key, properties FROM atoms WHERE entity_type = 'binaries'"
+        ).fetchall()
+        assert {key for key, _ in rows} == {"path:/usr/bin/tool", "path:/opt/vendor/tool"}
+        assert {json.loads(props)["sha256"] for _, props in rows} == {"aaa", "bbb"}
+        assert all(json.loads(props)["executable_name"] == "tool" for _, props in rows)
+        assert atomize_db(conn, conn, version_id, ["binaries"]) == {"binaries": 0}
+
+
+def test_atomize_keeps_unlinked_same_named_binaries(db_path):
+    with closing(sqlite3.connect(db_path)) as conn:
+        version_id = _insert_version(conn, "unlinked-binary-names")
+        conn.executemany(
+            "INSERT INTO binaries (file_id, executable_name, arch) VALUES (?, 'tool', ?)",
+            [(998, "arm64"), (999, "x86_64")],
+        )
+        conn.commit()
+        assert atomize_db(conn, conn, version_id, ["binaries"]) == {"binaries": 2}
+        assert atomize_db(conn, conn, version_id, ["binaries"]) == {"binaries": 0}
+        rows = conn.execute("SELECT source_key, properties FROM atoms").fetchall()
+        assert len({key for key, _ in rows}) == 2
+        assert all("path" not in json.loads(props) for _, props in rows)
+
+
+def test_atomize_refuses_to_duplicate_legacy_name_keyed_atoms(db_path):
+    with closing(sqlite3.connect(db_path)) as conn:
+        version_id = _insert_version(conn, "legacy-atom-keys")
+        conn.execute("INSERT INTO files (id, path, filename) VALUES (1, '/usr/bin/tool', 'tool')")
+        conn.execute("INSERT INTO binaries (file_id, executable_name) VALUES (1, 'tool')")
+        properties = json.dumps({"executable_name": "tool", "path": "/usr/bin/tool"})
+        conn.execute(
+            "INSERT INTO atoms "
+            "(source_version_id, entity_type, source_key, properties, created_at) "
+            "VALUES (?, 'binaries', 'tool', ?, '2026-01-01T00:00:00Z')",
+            (version_id, properties),
+        )
+        conn.commit()
+        with pytest.raises(ValueError, match="fresh resolution output"):
+            atomize_db(conn, conn, version_id)
+        assert conn.execute("SELECT COUNT(*) FROM atoms").fetchone()[0] == 1
 
 
 def test_schema_is_v6(db_path):

@@ -14,12 +14,8 @@ def _cleanup_build_temp(temp: Path, checkpoint: Path) -> None:
 
 
 def cmd_build(args):
-    import os
-    import uuid
-
+    from icarus.core.build_lock import output_lease
     from icarus.core.detection import DetectionBudgetExceeded
-    from icarus.core.pipeline import create_default_pipeline
-    from icarus.core.schema import open_db
     from icarus.parsers import detect_parser
 
     source = Path(args.source)
@@ -43,6 +39,17 @@ def cmd_build(args):
         print(f"[ICARUS] Auto-detected parser: {parser_name}")
 
     output = Path(args.output)
+    with output_lease(output):
+        return _run_build(args, source, output, parser_name)
+
+
+def _run_build(args, source: Path, output: Path, parser_name: str):
+    """Run while the final output's process lease is held, including replacement."""
+    import os
+    import uuid
+
+    from icarus.core.pipeline import create_default_pipeline
+    from icarus.core.schema import open_db
 
     if args.fresh:
         # Atomic clean rebuild: build into a sibling temp DB in the same
@@ -340,7 +347,9 @@ def cmd_resolve(args):
                 f"merges={result['merges']} atoms_resolved={result['atoms_resolved']}"
             )
 
-        canonical_count = r.conn.execute("SELECT COUNT(*) FROM bags").fetchone()[0]
+        canonical_count = r.conn.execute(
+            "SELECT COUNT(DISTINCT bag_id) FROM bag_atoms"
+        ).fetchone()[0]
         cross_source_count = r.conn.execute(
             "SELECT COUNT(*) FROM ("
             "SELECT bag_id FROM bag_atoms ba JOIN atoms a ON a.id = ba.atom_id "

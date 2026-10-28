@@ -358,8 +358,8 @@ def export_to_stix(
     _require_export_trust(Path(db_path), allow_unverified)
     conn = open_db(db_path, readonly=True, immutable=True)
     conn.row_factory = sqlite3.Row
-    objects = []
-    objects_by_id = {}
+    objects: list[dict] = []
+    objects_by_id: dict[str, dict] = {}
 
     try:
         tables = include_tables or [

@@ -8,12 +8,15 @@ attributes, FTS5 full-text search, and materialized views.
 import platform
 import re
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Optional, Union
 
 
 def _windows_memory_status() -> Optional[tuple]:
     """Return (total_bytes, available_bytes) on Windows, or None on failure."""
+    if sys.platform != "win32":
+        return None
     try:
         import ctypes
 
@@ -31,7 +34,8 @@ def _windows_memory_status() -> Optional[tuple]:
             ]
         stat = MEMORYSTATUSEX()
         stat.dwLength = ctypes.sizeof(stat)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return None
         return stat.ullTotalPhys, stat.ullAvailPhys
     except Exception:
         return None
@@ -135,8 +139,9 @@ def open_db(
     available RAM on every working connection, not just a connection that's
     about to be closed.
 
-    Pass ``readonly=True`` to open the database read-only via URI (``mode=ro``:
-    no writes to the main file, no -wal/-shm side files created).
+    Pass ``readonly=True`` to open the main database read-only via URI
+    (``mode=ro``). SQLite may still use WAL/shared-memory sidecars for locking;
+    use immutable mode only when the input is a frozen, checkpointed snapshot.
 
     Pass ``immutable=True`` (only meaningful with ``readonly=True``) to also
     add ``immutable=1``, which promises SQLite the file cannot change and lets
@@ -147,7 +152,7 @@ def open_db(
     ``readonly=True`` WITHOUT ``immutable`` so it honours the WAL.
     """
     if readonly:
-        uri = f"file:{path}?mode=ro"
+        uri = Path(path).resolve().as_uri() + "?mode=ro"
         if immutable:
             uri += "&immutable=1"
         conn = sqlite3.connect(uri, uri=True)
@@ -556,7 +561,7 @@ _EXPECTED_SCHEMA_OBJECTS = {
 
 def _validate_current_schema(conn: sqlite3.Connection) -> None:
     """Refuse a database that claims the current version but is incomplete."""
-    missing = []
+    missing: list[str] = []
     for object_type, expected_names in _EXPECTED_SCHEMA_OBJECTS.items():
         actual_names = {
             row[0]

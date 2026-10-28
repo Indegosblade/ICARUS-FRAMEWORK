@@ -130,6 +130,14 @@ Temporal events against any ontology entity. Generic foreign key pattern.
 
 Immutable observations from each source. Never modified after creation.
 
+Binary atoms use `path:<source file path>` as their source-local key; the
+executable name remains a separate matching property. This preserves distinct
+binaries with the same name in different directories. Legacy rows without a
+linked file use `row:<source binary row id>` instead. Re-atomizing a version that
+already contains the older name-based binary keys is refused: use a fresh
+resolution output or a new source version, rather than duplicating immutable
+observations under the new keys.
+
 ### bags
 
 Resolved entity groups. Atoms that represent the same real-world thing.
@@ -144,13 +152,37 @@ Resolved entity groups. Atoms that represent the same real-world thing.
 | atom_count | INTEGER | Number of atoms currently in this bag |
 | score | REAL | Added in v6. Mean of the in-cluster match-edge scores for a `resolve_scored` merge; NULL for singletons and for bags produced by the exact-key `resolve` |
 
+A merge keeps each losing bag as an empty historical record (`atom_count = 0`)
+so its original audit events retain a valid foreign-key target and their original
+bag identity. Current canonical entities are bags with current `bag_atoms`
+memberships; CLI canonical counts and resolution diffs exclude empty historical
+bags. Raw table counts include these historical records.
+
+Manual merges and splits clear the surviving bag's prior `score`, because a score
+measured for its earlier membership no longer describes the changed group.
+Original scores in historical decision events remain unchanged.
+
 ### bag_atoms
 
 Junction table: atom-to-bag membership.
 
 ### resolution_event_log
 
-Append-only audit trail of every resolution decision (create, merge, split, resolve).
+Append-only audit trail of every resolution decision (create, merge, split,
+resolve), maintained by the resolver API. A merge appends a `merge_into` event to
+each losing bag, with JSON `reason` containing `surviving_bag_id` and the caller's
+`reason`. A split appends a `split_from` event to its new bag with the moved atom
+IDs and JSON `reason` containing `source_bag_id` and the caller's `reason`.
+Existing events are never reassigned to another bag. This is application-level
+audit history, not tamper-proof storage against a caller with SQL write access.
+
+Resolver mutation APIs acquire a SQLite write lock before reading membership,
+so two resolver connections cannot validate the same atom as unassigned and
+then both bag it. Each top-level operation, including a full scored resolution,
+commits atomically. If the caller has already begun a transaction, the resolver
+uses a savepoint and leaves the final commit or rollback to the caller. A busy
+database or a stale WAL snapshot raises SQLite's locking error; callers can
+retry after ending the conflicting transaction.
 
 ### match_candidates
 

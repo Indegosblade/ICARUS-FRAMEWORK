@@ -148,7 +148,7 @@ class BaseParser(ABC):
 
     @staticmethod
     def _path_has_symlink(path: Path, root: Optional[Path] = None) -> bool:
-        """True when a component below ``root`` is a symlink.
+        """True when a component below ``root`` is a symlink or Windows reparse point.
 
         Host-managed ancestors outside the source tree are intentionally ignored:
         macOS runners, for example, may place temporary directories beneath a
@@ -171,7 +171,11 @@ class BaseParser(ABC):
         for part in parts:
             current /= part
             try:
-                if stat.S_ISLNK(current.lstat().st_mode):
+                entry_stat = current.lstat()
+                if stat.S_ISLNK(entry_stat.st_mode) or (
+                    getattr(entry_stat, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                ):
                     return True
             except (OSError, PermissionError):
                 return True

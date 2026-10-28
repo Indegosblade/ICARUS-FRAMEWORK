@@ -53,6 +53,7 @@ output/
 
 # Checkpoints (pipeline resume state)
 .*_checkpoint.db
+.*.icarus.lock
 
 # Sensitive
 *.pem
