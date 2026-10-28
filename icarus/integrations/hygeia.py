@@ -11,6 +11,7 @@ import json
 import re
 import secrets
 import sqlite3
+from contextlib import ExitStack, closing
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Dict, List
@@ -41,7 +42,7 @@ except PackageNotFoundError:
 
 ENGINE_NAME = "hygeia.sqlite_sanitizer.sanitize_database_generic"
 MAX_RECORDED_FINDINGS = 100
-AUDIT_VERSION = 1
+AUDIT_VERSION = 2
 FINAL_GATE_NAME = "pipeline-final"
 
 # This metadata is evidence about the database contents, not durable database
@@ -359,6 +360,52 @@ def _fingerprint(value: str, key: bytes) -> str:
     return f"hmac-sha256:{digest.hexdigest()}"
 
 
+def _validate_source_identity_policy(conn: sqlite3.Connection) -> None:
+    """Reject obsolete/private resume material before certifying public output.
+
+    The public HMAC is an identity label, not an attestation. Its key belongs
+    only in a private checkpoint and must never be copied into the artifact.
+    """
+    if conn.execute(
+        "SELECT 1 FROM metadata WHERE key IN "
+        "('source_identity_sha256', 'source_identity_key') LIMIT 1"
+    ).fetchone():
+        raise SanitizationError("Public metadata contains unsupported resume identity material")
+    for (raw,) in conn.execute("SELECT metadata FROM versions WHERE metadata IS NOT NULL"):
+        try:
+            details = json.loads(raw)
+        except (TypeError, ValueError, RecursionError):
+            raise SanitizationError(
+                "Version metadata cannot be checked for resume privacy"
+            ) from None
+        if not isinstance(details, dict):
+            raise SanitizationError(
+                "Version metadata must be an object for resume-privacy verification"
+            )
+        if "source_identity_sha256" in details:
+            raise SanitizationError(
+                "Deprecated source identity requires explicit completed-output remediation "
+                "or an ownership-validated resume"
+            )
+        if "source_identity_key" in details:
+            raise SanitizationError(
+                "Private resume identity material is present in public metadata"
+            )
+        if "source_identity" not in details:
+            continue
+        identity = details["source_identity"]
+        if (
+            not isinstance(identity, dict)
+            or set(identity) != {"version", "algorithm", "digest"}
+            or type(identity["version"]) is not int
+            or identity["version"] != 1
+            or identity["algorithm"] != "hmac-sha256"
+            or not isinstance(identity["digest"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", identity["digest"]) is None
+        ):
+            raise SanitizationError("Public resume identity has an unsupported format")
+
+
 def _scan_database(db_path: Path, registry, fingerprint_key: bytes) -> Dict[str, Any]:
     """Scan with HYGEIA patterns and return locations/fingerprints, never matches."""
     if not db_path.exists() or not db_path.is_file():
@@ -370,6 +417,7 @@ def _scan_database(db_path: Path, registry, fingerprint_key: bytes) -> Dict[str,
     checked_rows = 0
     total_findings = 0
     try:
+        _validate_source_identity_policy(conn)
         for table, columns in _get_text_columns(conn).items():
             quoted_table = _quote_ident(table)
             select_list = ", ".join(_quote_ident(column) for column in columns)
@@ -441,6 +489,8 @@ def _record_finalized_audit(db_path: Path, engine: Dict[str, str], audit: Dict[s
     }
     conn = sqlite3.connect(str(db_path))
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        _validate_source_identity_policy(conn)
         conn.execute(
             "DELETE FROM metadata WHERE key IN ('hygeia_skipped', 'hygeia_warning')"
         )
@@ -500,23 +550,34 @@ def _rebuild_fts_indexes(db_path: Path) -> None:
         conn.close()
 
 
-def _has_valid_verified_audit(rows: Dict[str, str]) -> bool:
+def _has_valid_verified_audit(rows: Dict[str, str], *, legacy: bool = False) -> bool:
     """Return whether metadata contains the versioned successful-gate evidence."""
     try:
         engine = json.loads(rows["hygeia_engine"])
         audit = json.loads(rows["hygeia_audit"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, RecursionError):
         return False
+    engine_version = _HYGEIA_VERSION
+    if legacy:
+        legacy_version = engine.get("version") if isinstance(engine, dict) else None
+        if (
+            not isinstance(legacy_version, str)
+            or not legacy_version
+            or legacy_version == "unavailable"
+        ):
+            return False
+        engine_version = legacy_version
     expected_engine = {
         "engine": ENGINE_NAME,
-        "version": _HYGEIA_VERSION,
+        "version": engine_version,
         "mode": "fail-closed",
     }
     return (
         _HYGEIA_VERSION != "unavailable"
         and engine == expected_engine
         and isinstance(audit, dict)
-        and audit.get("audit_version") == AUDIT_VERSION
+        and type(audit.get("audit_version")) is int
+        and audit.get("audit_version") == (1 if legacy else AUDIT_VERSION)
         and audit.get("engine") == engine
         and audit.get("verified") is True
         and audit.get("gate") == FINAL_GATE_NAME
@@ -554,7 +615,9 @@ def sanitization_status(db_path: Path, *, immutable: bool = False) -> str:
                 "('hygeia_status', 'hygeia_skipped', 'hygeia_engine', 'hygeia_audit')"
             ).fetchall()
         )
-    except sqlite3.Error:
+        if rows.get("hygeia_status") == "verified" and _has_valid_verified_audit(rows):
+            _validate_source_identity_policy(conn)
+    except (sqlite3.Error, SanitizationError):
         return "unknown"
     finally:
         conn.close()
@@ -688,6 +751,108 @@ def finalize_sanitization(db_path: Path) -> Dict[str, Any]:
         mark_sanitization_failed(db_path)
         raise SanitizationError("Could not publish finalized sanitization evidence") from None
     return gate
+
+
+def remediate_legacy_output(db_path: Path) -> Dict[str, Any]:
+    """Re-sanitize an explicitly completed legacy artifact without its source.
+
+    This in-place operation requires every version to be complete and refuses
+    owned or ambiguous checkpoint state. It removes only the obsolete source
+    identity field, preserving unrelated provenance. The real sanitizer and a
+    version-2 final audit are mandatory; an interrupted/failed operation remains
+    unverified. It neither resumes a build nor deletes checkpoint files.
+    """
+    from icarus.core.build_lock import output_lease
+    from icarus.core.pipeline import CheckpointProvenanceError, Pipeline
+
+    path = Path(db_path)
+    path = path.parent.resolve() / path.name
+    if not path.is_file():
+        raise SanitizationError("Completed-output remediation requires an existing database")
+    require_hygeia()
+    probe = Pipeline(Path("."), path)
+    with ExitStack() as leases:
+        leases.enter_context(output_lease(path))
+        for checkpoint, legacy in (
+            (probe.checkpoint_db, False), (probe.legacy_checkpoint_db, True),
+        ):
+            leases.enter_context(output_lease(checkpoint))
+            if not checkpoint.exists():
+                if any(Path(str(checkpoint) + suffix).exists()
+                       for suffix in ("-wal", "-shm", "-journal")):
+                    raise SanitizationError(
+                        "Unresolved checkpoint sidecars require resume/recovery before remediation"
+                    )
+                continue
+            try:
+                owned = probe._checkpoint_owned_by_output(checkpoint, legacy=legacy)
+            except CheckpointProvenanceError:
+                raise SanitizationError(
+                    "Ambiguous checkpoint ownership requires resume/recovery before remediation"
+                ) from None
+            if owned:
+                raise SanitizationError(
+                    "Owned checkpoint state must pass through resume/recovery before remediation"
+                )
+
+        # Validate eligibility without changing the artifact. Read-only URI mode
+        # also prevents an accidental create if a target disappeared meanwhile.
+        changes = []
+        try:
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as conn:
+                conn.execute("BEGIN")
+                versions = conn.execute(
+                    "SELECT id, completed_at, metadata FROM versions"
+                ).fetchall()
+                markers = dict(conn.execute(
+                    "SELECT key, value FROM metadata WHERE key IN "
+                    "('hygeia_status', 'hygeia_skipped', 'hygeia_engine', "
+                    "'hygeia_audit', 'hygeia_warning')"
+                ))
+            if (
+                markers.get("hygeia_status") != "verified"
+                or "hygeia_skipped" in markers
+                or "hygeia_warning" in markers
+                or not _has_valid_verified_audit(markers, legacy=True)
+            ):
+                raise SanitizationError(
+                    "Coherent legacy completion evidence is required; resume/recover first"
+                )
+            if not versions or any(
+                not isinstance(completed, str) or not completed.strip()
+                for _, completed, _ in versions
+            ):
+                raise SanitizationError("Incomplete provenance requires resume/recovery first")
+            for version_id, _, raw in versions:
+                if raw is None:
+                    continue
+                details = json.loads(raw)
+                if not isinstance(details, dict):
+                    raise SanitizationError("Completed version metadata must be an object")
+                if "source_identity_sha256" in details:
+                    details.pop("source_identity_sha256")
+                    changes.append((json.dumps(details, sort_keys=True), version_id))
+        except (sqlite3.Error, TypeError, ValueError, RecursionError):
+            raise SanitizationError("Completed provenance cannot be established safely") from None
+
+        try:
+            # Durable revocation comes first: a later SQL error, sanitizer
+            # failure or process interruption must not retain a clean marker.
+            mark_sanitization_failed(path)
+            with closing(sqlite3.connect(path)) as conn, conn:
+                conn.execute("PRAGMA secure_delete = ON")
+                conn.executemany("UPDATE versions SET metadata = ? WHERE id = ?", changes)
+            sanitized = sanitize_output(path)
+            finalize_sanitization(path)
+        except Exception:
+            try:
+                mark_sanitization_failed(path)
+            except sqlite3.Error:
+                pass
+            raise SanitizationError(
+                "Legacy output remediation did not complete; the artifact remains unverified"
+            ) from None
+        return {"versions_remediated": len(changes), "sanitization": sanitized}
 
 
 def using_standalone_hygeia() -> bool:
