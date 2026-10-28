@@ -8,6 +8,7 @@ and ``icarus parser validate`` raised FileNotFoundError on the schema, while CI 
 green because it installs the project editable (files present on disk in the source
 tree). These tests build the real artifacts and assert the data is present.
 """
+import os
 import shutil
 import subprocess
 import sys
@@ -163,33 +164,69 @@ def test_wheel_installed_parser_test_runs_outside_checkout(built_dists, tmp_path
         assert proc.stdout.count("[PASS]") == 4, f"{parser}: {proc.stdout}"
 
     gui_smoke = """
+import faulthandler
+faulthandler.enable()
+faulthandler.dump_traceback_later(20)
+import http.client
 import json
+import sys
 import threading
 from pathlib import Path
-from urllib.request import Request, urlopen
 from icarus.core.schema import initialize_database
 from icarus.gui.server import ExplorerServer
 
+print('Installed GUI: initializing database', file=sys.stderr, flush=True)
 database = Path('installed-gui.db')
 initialize_database(database)
 with ExplorerServer(database, allow_unverified=True) as server:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        for path in ('/', '/app.js', '/style.css'):
-            with urlopen(server.origin + path, timeout=5) as response:
-                assert response.status == 200 and response.read()
-        request = Request(server.origin + '/api/summary',
-                          headers={'Authorization': 'Bearer ' + server.token})
-        with urlopen(request, timeout=5) as response:
-            assert json.load(response)['tables']['files'] == 0
+        for path in ('/', '/app.js', '/style.css', '/api/summary'):
+            print('Installed GUI: GET ' + path, file=sys.stderr, flush=True)
+            connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)
+            try:
+                headers = {}
+                if path == '/api/summary':
+                    headers['Authorization'] = 'Bearer ' + server.token
+                connection.request('GET', path, headers=headers)
+                response = connection.getresponse()
+                body = response.read()
+                assert response.status == 200 and body
+                if path == '/api/summary':
+                    assert json.loads(body)['tables']['files'] == 0
+            finally:
+                connection.close()
     finally:
+        print('Installed GUI: shutting down server', file=sys.stderr, flush=True)
         server.shutdown()
         thread.join(timeout=5)
         assert not thread.is_alive()
+faulthandler.cancel_dump_traceback_later()
+print('Installed GUI: assets, authorized API, and shutdown passed', file=sys.stderr, flush=True)
 """
-    proc = subprocess.run(
-        [str(python), "-I", "-c", gui_smoke], cwd=outside_checkout,
-        capture_output=True, text=True, timeout=30,
-    )
+    # The explorer is loopback-only. A smoke client must not consult environment
+    # or OS proxy discovery (which urllib performs before its socket timeout).
+    # Poison proxy settings to exercise that boundary in the installed wheel.
+    gui_env = os.environ.copy()
+    for variable in (
+        "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY",
+    ):
+        gui_env[variable] = "http://127.0.0.1:1"
+    gui_env.update({"no_proxy": "", "NO_PROXY": ""})
+    try:
+        proc = subprocess.run(
+            [str(python), "-I", "-c", gui_smoke], cwd=outside_checkout,
+            env=gui_env, capture_output=True, text=True, timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired may return bytes even with text=True. Keep the staged
+        # progress and delayed thread dump, instead of losing the failure site.
+        stdout = (
+            exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
+        )
+        stderr = (
+            exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+        )
+        pytest.fail(f"Installed GUI exceeded 30 seconds:\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
     assert proc.returncode == 0, f"Installed GUI: {proc.stdout}\n{proc.stderr}"
