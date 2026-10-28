@@ -147,7 +147,10 @@ class Pipeline:
         # falls back to phase-name alignment alone.
         self.fingerprint = fingerprint
         self.phases: List[PipelinePhase] = []
-        self.checkpoint_db = self.output.parent / f".{self.output.stem}_checkpoint.db"
+        # Full filename prevents out.db/out.sqlite from sharing state. The new
+        # suffix is also disjoint from every legacy '*_checkpoint.db' name.
+        self.checkpoint_db = self.output.parent / f".{self.output.name}.icarus-checkpoint.db"
+        self.legacy_checkpoint_db = self.output.parent / f".{self.output.stem}_checkpoint.db"
         self.context = PipelineContext(self.source, self.output, parser_name)
 
     def add_phase(self, name: str, handler: Callable, description: str = "") -> None:
@@ -246,11 +249,106 @@ class Pipeline:
         returning False, so a wrong-source checkpoint is never quietly treated
         as "no checkpoint" and rebuilt over the existing output.
         """
-        if not self.checkpoint_db.exists():
+        with output_lease(self.output):
+            checkpoint = self._select_checkpoint(resume=True, adopt=False)
+            if checkpoint is None:
+                return False
+            self._validate_checkpoint_at(checkpoint)
+            return True
+
+    def _validate_checkpoint_at(self, checkpoint: Path) -> None:
+        """Validate without changing this pipeline's context or checkpoint files."""
+        probe = Pipeline(
+            self.source, self.output, self.parser_name,
+            skip_hygeia=self.skip_hygeia, fingerprint=self.fingerprint,
+        )
+        probe.checkpoint_db = checkpoint
+        probe._validate_fingerprint()
+        probe._restore_version_identity()
+
+    def _checkpoint_owned_by_output(self, checkpoint: Path, *, legacy: bool = False) -> bool:
+        """Establish ownership from the actual output, never the stem alone."""
+        label = "legacy checkpoint" if legacy else "checkpoint"
+        try:
+            conn = sqlite3.connect(checkpoint.resolve().as_uri() + "?mode=ro", uri=True)
+            try:
+                metadata = dict(conn.execute(
+                    "SELECT key, value FROM checkpoint_meta "
+                    "WHERE key IN ('run_id', 'version_id', 'output_uri')"
+                ))
+            finally:
+                conn.close()
+            run_id = metadata["run_id"]
+            version_id = int(metadata["version_id"])
+            if not isinstance(run_id, str) or not run_id or version_id < 1:
+                raise ValueError("Invalid run identity")
+            conn = open_db(self.output, readonly=True)
+            try:
+                row = conn.execute(
+                    "SELECT run_id FROM versions WHERE id = ?", (version_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        except (sqlite3.Error, KeyError, TypeError, ValueError) as error:
+            raise CheckpointProvenanceError(
+                f"Cannot establish ownership of {label} {checkpoint.name}; "
+                "preserving it. Use --fresh or a separate output path, or recover "
+                "the original database/checkpoint pair before resuming."
+            ) from error
+        owned = row is not None and row[0] == run_id
+        stored_output = metadata.get("output_uri")
+        if stored_output is not None and stored_output != self.output.resolve().as_uri():
+            if owned:
+                raise CheckpointProvenanceError(
+                    f"Ambiguous {label} output identity; preserving both artifacts. "
+                    "Use --fresh or recover the original database/checkpoint pair."
+                )
             return False
-        self._validate_fingerprint()  # raises on mismatch
-        self._restore_version_identity()
-        return True
+        return owned
+
+    @staticmethod
+    def _require_quiescent_legacy(checkpoint: Path) -> None:
+        for suffix in ("-wal", "-journal"):
+            sidecar = Path(str(checkpoint) + suffix)
+            if sidecar.exists() and sidecar.stat().st_size:
+                raise CheckpointProvenanceError(
+                    "Legacy checkpoint has a nonempty WAL or journal; preserving "
+                    "all files. Close its writer and recover/checkpoint SQLite "
+                    "before retrying, or use --fresh."
+                )
+
+    def _select_checkpoint(self, *, resume: bool, adopt: bool) -> Optional[Path]:
+        """Recognize old state; migrate only a proven owner under both leases.
+
+        The caller holds the output lease. A shared legacy-namespace lease
+        serializes inspection/migration by outputs that formerly shared a stem.
+        A read-only predicate never renames or removes checkpoint data.
+        """
+        modern = self.checkpoint_db if self.checkpoint_db.exists() else None
+        legacy = self.legacy_checkpoint_db
+        if not legacy.exists() or not self.output.exists():
+            return modern
+        with output_lease(legacy):
+            if not legacy.exists():
+                return modern
+            if not self._checkpoint_owned_by_output(legacy, legacy=True):
+                return modern  # Foreign legacy state is never cleared or adopted.
+            if modern is not None:
+                raise CheckpointProvenanceError(
+                    "Ambiguous modern and owned legacy checkpoint state; preserving "
+                    "both. Recover the intended pair or use --fresh."
+                )
+            self._require_quiescent_legacy(legacy)
+            if resume:
+                self._validate_checkpoint_at(legacy)
+            if not adopt:
+                return legacy
+            legacy.replace(self.checkpoint_db)
+            # With no WAL/journal data and no open connection, these are only
+            # owned empty journals/shared-memory indexes, not separate state.
+            for suffix in ("-wal", "-shm", "-journal"):
+                Path(str(legacy) + suffix).unlink(missing_ok=True)
+            return self.checkpoint_db
 
     @staticmethod
     def _ensure_checkpoint_schema(conn: sqlite3.Connection) -> None:
@@ -282,6 +380,7 @@ class Pipeline:
             metadata = {
                 "run_id": self.context.run_id,
                 "version_id": str(self.context.version_id),
+                "output_uri": self.output.resolve().as_uri(),
             }
             if self.fingerprint is not None:
                 metadata["fingerprint"] = _canonical_fingerprint(self.fingerprint)
@@ -301,7 +400,7 @@ class Pipeline:
         try:
             rows = conn.execute(
                 "SELECT key, value FROM checkpoint_meta "
-                "WHERE key IN ('run_id', 'version_id')"
+                "WHERE key IN ('run_id', 'version_id', 'output_uri')"
             ).fetchall()
         except sqlite3.OperationalError as error:
             raise CheckpointProvenanceError(
@@ -312,6 +411,14 @@ class Pipeline:
             conn.close()
 
         metadata = dict(rows)
+        if (
+            "output_uri" in metadata
+            and metadata["output_uri"] != self.output.resolve().as_uri()
+        ):
+            raise CheckpointProvenanceError(
+                "Checkpoint belongs to a different output path; preserving it. "
+                "Recover the original database/checkpoint pair or use --fresh."
+            )
         missing = {"run_id", "version_id"} - metadata.keys()
         if missing:
             raise CheckpointProvenanceError(
@@ -493,6 +600,13 @@ class Pipeline:
             start_phase: Force start from this phase index (overrides resume).
         """
         with output_lease(self.output):
+            selected = self._select_checkpoint(resume=resume, adopt=True)
+            if not resume and selected is not None:
+                if not self.output.exists() or not self._checkpoint_owned_by_output(selected):
+                    raise CheckpointProvenanceError(
+                        "Cannot discard a checkpoint owned by a different or missing "
+                        "output; preserving it. Recover its original output or use --fresh."
+                    )
             return self._run(resume=resume, start_phase=start_phase)
 
     def _run(self, resume: bool = True, start_phase: Optional[int] = None) -> "PipelineContext":
@@ -520,8 +634,7 @@ class Pipeline:
                 conn.commit()
             finally:
                 conn.close()
-        if not restored_identity:
-            self._persist_version_identity()
+        self._persist_version_identity()
 
         print(f"[ICARUS] Pipeline: {len(self.phases)} phases, "
               f"source={self.source}, output={self.output}")
