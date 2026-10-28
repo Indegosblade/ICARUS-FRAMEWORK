@@ -41,6 +41,13 @@ and [configuration parser](https://github.com/systemd/systemd/blob/v258/src/shar
 The former preserves spaces, unlike its separate `read_stripped_line` helper;
 the latter tests escapes on that input and explicitly parses pending text at EOF.
 
+The same configuration parser strips the first UTF-8 BOM found at the start of
+a physical line, even if that line occurs later in the file. Further BOMs remain
+literal. Full-line comments are skipped before this check; BOM stripping happens
+before continuation joining. ICARUS follows that order so a late first BOM cannot
+hide a non-root override, and a BOM-prefixed comment/continuation cannot expose
+an apparent `User=root` that systemd would consume as part of another line.
+
 Configured identity is not effective identity. The official
 [systemd.exec documentation](https://www.freedesktop.org/software/systemd/man/258/systemd.exec.html)
 describes manager-dependent defaults, numeric IDs, and command prefixes that can

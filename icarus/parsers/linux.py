@@ -184,7 +184,7 @@ def _parse_service_identity(path: Path) -> tuple[str | None, str | None]:
             raw = handle.read(MAX_SYSTEMD_UNIT_BYTES + 1)
         if len(raw) > MAX_SYSTEMD_UNIT_BYTES:
             return None, None
-        text = raw.decode("utf-8-sig")
+        text = raw.decode("utf-8")
     except (OSError, UnicodeError):
         return None, None
     if "\0" in text:
@@ -209,10 +209,17 @@ def _parse_service_identity(path: Path) -> tuple[str | None, str | None]:
 def _systemd_logical_lines(text: str):
     """Join odd trailing-backslash continuations, preserving source value text."""
     pending: list[str] = []
+    bom_seen = False
     for physical in io.StringIO(text, newline=None):
         line = physical.rstrip("\r\n")
         if line.lstrip(" \t\r").startswith(("#", ";")):
             continue
+        # systemd strips the first BOM at any physical-line start, after its
+        # comment check but before joining continuations. A second BOM stays
+        # literal; decoding utf-8-sig only at byte zero cannot model this.
+        if not bom_seen and line.startswith("\ufeff"):
+            line = line[1:]
+            bom_seen = True
         trailing = len(line) - len(line.rstrip("\\"))
         if trailing % 2:
             pending.append(line[:-1] + " ")

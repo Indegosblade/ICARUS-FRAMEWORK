@@ -43,6 +43,23 @@ def test_only_explicit_service_identity_assignments_are_preserved(tmp_path, sour
     assert _parse_service_identity(path) == expected
 
 
+@pytest.mark.parametrize(("source", "expected"), [
+    ("[Service]\nUser=root\n\ufeffUser=nobody\n", ("nobody", None)),
+    ("\ufeff[Service]\nUser=root\n\ufeffUser=nobody\n", ("root", None)),
+    ("[Service]\nUser=root\n#\ufeff ignored\n\ufeffUser=nobody\n", ("nobody", None)),
+    ("[Service]\nUser=root\n\ufeff# comment\n\ufeffUser=nobody\n", ("root", None)),
+    ("[Service]\nUser=root\n \ufeffUser=nobody\n\ufeffGroup=daemon\n", ("root", "daemon")),
+    ("[Service]\nUser=nobody\n\ufeff# comment\\\nUser=root\n", ("nobody", None)),
+    ("\ufeff# comment\\\n[Service]\nUser=root\n", (None, None)),
+])
+def test_first_physical_bom_matches_systemd_comment_and_continuation_order(
+    tmp_path, source, expected,
+):
+    path = tmp_path / "bom.service"
+    path.write_bytes(source.encode("utf-8"))
+    assert _parse_service_identity(path) == expected
+
+
 def test_identity_read_cap_and_invalid_encoding_fail_unknown(tmp_path, monkeypatch):
     path = tmp_path / "example.service"
     path.write_bytes(b"[Service]\nUser=ro\xffot\n")
@@ -69,6 +86,7 @@ def test_linux_build_preserves_users_provenance_and_excludes_unknown_root(tmp_pa
         ("nonroot", "User=nobody\nGroup=daemon\nNoNewPrivileges=yes\nProtectSystem=strict"),
         ("root", "User=root"), ("uidzero", "User=0"), ("unknown", ""),
         ("specifier", "User=%i"), ("quoted", 'User="root"'),
+        ("latebom", "User=root\n\ufeffUser=nobody"),
     ):
         (units / f"{name}.service").write_text(
             f"[Service]\nExecStart=/usr/bin/example\n{identity}\n", encoding="utf-8",
@@ -83,6 +101,7 @@ def test_linux_build_preserves_users_provenance_and_excludes_unknown_root(tmp_pa
         ).rows
     values = {row[1]: row for row in rows}
     assert values["nonroot"][2:4] == ("nobody", "daemon")
+    assert values["latebom"][2] == "nobody"
     assert values["unknown"][2] is None
     assert all(row[4] == context.version_id and row[5] for row in rows)
 
