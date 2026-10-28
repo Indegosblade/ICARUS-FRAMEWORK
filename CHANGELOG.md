@@ -4,14 +4,19 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Version identity note: historical Git tags, GitHub releases, and `pyproject` versions
-diverged during early development. The project is moving forward monotonically; see the
-`4.0.0b2` beta line once released. Do not rely on pre-4.0 tags for reproducibility.
+Release history: earlier GitHub release pages cover only part of the tagged
+history. Existing tags remain intact. The `4.0.0b2` prerelease provides an aligned
+tag, package version, and downloadable wheel and source distribution. Historical
+release notes describe their original behavior, not the current operating contract.
 
 ## [Unreleased]
 
-Changes targeting `4.0.0b2`. This section describes the current development
-line; it does not announce a tagged release.
+Changes after `4.0.0b2` will be recorded here.
+
+## [4.0.0b2] - 2026-10-28
+
+Beta prerelease. Entity resolution remains experimental; ontology v7 is a design
+proposal, while the shipped database schema remains v6.
 
 ### Added
 - Local read-only ontology explorer with loopback session capability, bounded
@@ -64,6 +69,8 @@ line; it does not announce a tagged release.
   version is refused instead of silently relabeled (#39).
 
 ### Repository
+- Distribution metadata uses an SPDX license expression and includes the existing
+  license text in both wheel and source archives.
 - Merges are squash-only with automatic branch deletion; `main` is branch-protected
   (required CI checks, no force-push). Dependabot version-update PRs are disabled.
   `.mailmap` normalizes the author identity.
@@ -83,4 +90,5 @@ line; it does not announce a tagged release.
 - First stable release: pipeline with checkpoint/resume, schema v4 + FTS5, query engine,
   cross-version differ, 8 production parsers, HYGEIA sanitization, STIX 2.1 export.
 
-[Unreleased]: https://github.com/Indegosblade/icarus-framework/compare/main...HEAD
+[Unreleased]: https://github.com/Indegosblade/ICARUS-FRAMEWORK/compare/v4.0.0b2...HEAD
+[4.0.0b2]: https://github.com/Indegosblade/ICARUS-FRAMEWORK/releases/tag/v4.0.0b2
