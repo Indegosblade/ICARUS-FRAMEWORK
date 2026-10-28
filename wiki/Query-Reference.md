@@ -192,7 +192,7 @@ FROM match_candidates ORDER BY score DESC LIMIT 20
 
 **Cross-version additions:**
 ```python
-from icarus.core.diff import IcarusDiffer
+from icarus.core.differ import IcarusDiffer
 
 with IcarusDiffer("v1.db", "v2.db") as d:
     results = d.full_diff()
