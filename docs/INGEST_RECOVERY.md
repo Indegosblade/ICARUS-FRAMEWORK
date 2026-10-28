@@ -38,10 +38,15 @@ depending on that cleanup. A different source, parser, or active run is refused.
 The private progress tables are removed after successful extraction and never
 appear in a completed output.
 
-Run only one writer process per output database. This mechanism provides atomic
-recovery, not coordination between simultaneous builds. macOS and other parsers
-retain phase-level replay until they explicitly adopt an equivalent transaction
-contract; their multi-pass extraction is not covered by the filesystem cursor.
+The CLI and `Pipeline.run()` hold an OS-backed output lease before changing run
+identity or checkpoint state. A competing ICARUS build fails before writing;
+`--fresh` keeps the destination leased through final replacement. A persistent
+hidden `.icarus.lock` sidecar stores no path or PID. Process termination releases
+the operating-system lock automatically; do not delete a live sidecar. Direct
+parser calls and unrelated external SQLite writers are outside this coordination
+contract. macOS and other parsers retain phase-level replay until they explicitly
+adopt an equivalent transaction contract; their multi-pass extraction is not
+covered by the filesystem cursor.
 
 `tests/test_ingest_progress.py` exercises an actual subprocess `os._exit`,
 recovery without reopening completed directories, rollback after a partial
