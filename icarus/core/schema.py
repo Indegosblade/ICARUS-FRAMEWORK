@@ -158,9 +158,16 @@ def open_db(
         conn = sqlite3.connect(uri, uri=True)
     else:
         conn = sqlite3.connect(str(path))
-        conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA foreign_keys = ON")
-    _apply_performance_pragmas(conn)
+    try:
+        if not readonly:
+            conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA foreign_keys = ON")
+        _apply_performance_pragmas(conn)
+    except BaseException:
+        # Ownership transfers only on return. Failed setup must not strand an
+        # open handle in an exception traceback or rely on garbage collection.
+        conn.close()
+        raise
     return conn
 
 
