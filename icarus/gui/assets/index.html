@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ICARUS · Ontology explorer</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">I</span><div><strong>ICARUS</strong><span class="eyebrow">ONTOLOGY EXPLORER</span></div></div>
+    <div class="session"><span id="database-name">Connecting…</span><span class="badge">READ ONLY · LOCAL</span></div>
+  </header>
+  <div id="warning" class="warning" role="status" hidden></div>
+  <div id="error" class="error" role="alert" hidden></div>
+  <div class="workspace">
+    <aside class="sidebar" aria-label="Entity collections">
+      <div class="section-label">COLLECTIONS</div>
+      <p class="sidebar-note">Explore extracted objects and the relationships recorded between them.</p>
+      <nav id="collections"></nav>
+      <div class="sidebar-foot">A view of your database.<br>Extraction and sanitization stay in the build pipeline.</div>
+    </aside>
+    <main>
+      <div class="collection-head"><div><div class="section-label">ENTITY INVENTORY</div><h1 id="collection-title">Loading workspace</h1><p id="collection-count" class="muted"></p></div><span id="search-kind" class="badge subtle"></span></div>
+      <form id="search-form" role="search"><label for="search">Search this collection</label><div class="search-row"><input id="search" type="search" placeholder="Full-text search…" maxlength="200" autocomplete="off"><button id="search-button" type="submit">Search</button><button id="clear-search" type="button" class="secondary">Clear</button></div><p id="search-help" class="muted small"></p></form>
+      <div class="table-wrap"><table id="entities"><thead></thead><tbody></tbody></table><p id="empty" class="empty" hidden>No entities found in this collection.</p></div>
+      <div class="pagination"><span id="page-status" class="muted small"></span><div><button id="previous" class="secondary" type="button" disabled>Previous</button><button id="next" class="secondary" type="button" disabled>Next</button></div></div>
+    </main>
+    <aside class="inspector" aria-label="Selected entity">
+      <div class="section-label">OBJECT INSPECTOR</div><h2 id="detail-title">Select an entity</h2><p id="detail-subtitle" class="muted">Open a row to inspect its properties, provenance, and recorded relationships.</p>
+      <section id="provenance-section" hidden><h3>Provenance</h3><dl id="provenance" class="properties provenance"></dl></section>
+      <section id="properties-section" hidden><h3>Properties</h3><dl id="properties" class="properties"></dl></section>
+      <section id="relationships-section" hidden><h3>Relationships</h3><div id="relationships"></div></section>
+    </aside>
+  </div>
+</body>
+</html>

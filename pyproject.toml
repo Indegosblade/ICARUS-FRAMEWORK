@@ -88,6 +88,7 @@ exclude = ["icarus.parsers.private", "icarus.parsers.private.*"]
 # package. Declared per-package (each dir is a real package) so bdist_wheel copies
 # them; MANIFEST.in carries the same files into the sdist.
 icarus = ["py.typed"]
+"icarus.gui" = ["assets/*.html", "assets/*.js", "assets/*.css"]
 "icarus.parsers" = ["*.yaml"]
 "icarus.parsers.cloud.aws" = ["*.yaml"]
 "icarus.parsers.generic" = ["*.yaml"]

@@ -359,6 +359,20 @@ def cmd_resolve(args):
     print(f"Canonical entities: {canonical_count} ({cross_source_count} spanning >= 2 sources)")
 
 
+def cmd_gui(args):
+    """Serve a capability-protected, read-only explorer on loopback only."""
+    from icarus.gui.server import serve
+
+    if not 0 <= args.port <= 65535:
+        raise ValueError("--port must be in [0, 65535]")
+    try:
+        serve(Path(args.database), port=args.port, allow_unverified=args.allow_unverified,
+              open_browser=not args.no_browser)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: explorer could not start: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="icarus",
@@ -383,6 +397,15 @@ def main():
         "--resolve", action="store_true",
         help="EXPERIMENTAL: run entity resolution (resolve_scored) as a build phase, "
              "after verify and before sanitize")
+
+    # gui (optional local read-only ontology explorer)
+    gui_p = sub.add_parser("gui", help="Open the local read-only ontology explorer")
+    gui_p.add_argument("database", help="Path to ICARUS database")
+    gui_p.add_argument("--port", type=int, default=0, help="Loopback port (default: automatic)")
+    gui_p.add_argument("--no-browser", action="store_true",
+                       help="Print URL without opening a browser")
+    gui_p.add_argument("--allow-unverified", action="store_true",
+                       help="Inspect failed or unmarked output (unsafe; may contain private data)")
 
     # query
     query_p = sub.add_parser("query", help="Query an intelligence database")
@@ -453,7 +476,7 @@ def main():
 
     try:
         {"build": cmd_build, "query": cmd_query, "exec": cmd_exec, "diff": cmd_diff,
-         "parser": cmd_parser, "resolve": cmd_resolve}[args.command](args)
+         "parser": cmd_parser, "resolve": cmd_resolve, "gui": cmd_gui}[args.command](args)
     except FileNotFoundError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

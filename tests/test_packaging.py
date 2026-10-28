@@ -39,6 +39,11 @@ EXPECTED_JSON = {
     "icarus/parsers/catalog/parsers-devel.json",
 }
 EXPECTED = EXPECTED_YAML | EXPECTED_JSON
+EXPECTED |= {
+    "icarus/gui/assets/index.html",
+    "icarus/gui/assets/app.js",
+    "icarus/gui/assets/style.css",
+}
 SELFTEST_ROOT = REPO_ROOT / "icarus" / "parsers" / "selftest"
 EXPECTED_SELFTEST = {
     path.relative_to(REPO_ROOT).as_posix()
@@ -156,3 +161,35 @@ def test_wheel_installed_parser_test_runs_outside_checkout(built_dists, tmp_path
             f"{parser}: STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
         assert proc.stdout.count("[PASS]") == 4, f"{parser}: {proc.stdout}"
+
+    gui_smoke = """
+import json
+import threading
+from pathlib import Path
+from urllib.request import Request, urlopen
+from icarus.core.schema import initialize_database
+from icarus.gui.server import ExplorerServer
+
+database = Path('installed-gui.db')
+initialize_database(database)
+with ExplorerServer(database, allow_unverified=True) as server:
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for path in ('/', '/app.js', '/style.css'):
+            with urlopen(server.origin + path, timeout=5) as response:
+                assert response.status == 200 and response.read()
+        request = Request(server.origin + '/api/summary',
+                          headers={'Authorization': 'Bearer ' + server.token})
+        with urlopen(request, timeout=5) as response:
+            assert json.load(response)['tables']['files'] == 0
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+"""
+    proc = subprocess.run(
+        [str(python), "-I", "-c", gui_smoke], cwd=outside_checkout,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, f"Installed GUI: {proc.stdout}\n{proc.stderr}"
