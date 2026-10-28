@@ -280,7 +280,10 @@ See [about/PARSERS.md](about/PARSERS.md) for the parser development guide.
 | Search | `files_fts`, `daemons_fts`, `atoms_fts` |
 | Views | `v_sandbox_escape_surface`, `v_kernel_attack_surface`, `v_test_binaries` |
 
-`mach_services` (added in v5) normalizes each launchd job's advertised Mach services into rows — the reachability pivot from a Mach service name to the daemon that vends it, and the join behind `v_sandbox_escape_surface`.
+`mach_services` (added in v5) normalizes each launchd job's configured Mach-service
+declarations into rows, linking a service name to the job declaring it. The
+legacy `v_sandbox_escape_surface` join provides declaration candidates; it does
+not prove runtime reachability, privilege, an absent sandbox, or an escape.
 
 `match_candidates` and `bags.score` (added in v6) make entity resolution auditable: every scored atom pair the resolver considered is stored with its similarity score and per-field features, and each merged bag carries the confidence that produced it.
 

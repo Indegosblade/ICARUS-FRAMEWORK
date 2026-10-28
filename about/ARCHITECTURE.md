@@ -144,9 +144,20 @@ in `icarus/core/schema.py`; `schema/icarus_schema.sql` is a generated v6 referen
 | Search | files_fts, daemons_fts, atoms_fts |
 | Views | v_sandbox_escape_surface, v_kernel_attack_surface, v_test_binaries |
 
-`mach_services` normalizes each launchd Mach service name to the daemon that vends it — the Mach-service -> daemon reachability pivot for attack-surface queries. `match_candidates` (added in v6) records audited scored atom pairs from the experimental resolver.
+`mach_services` links each configured launchd Mach-service name to the job
+declaring it. The join supports configuration inspection; it does not verify
+runtime registration or client access. `match_candidates` (added in v6) records
+audited scored atom pairs from the experimental resolver.
 
-Migration chain: v2 -> v3 -> v4 -> v5 -> v6. Applied automatically on database open.
+The view names are historical compatibility surfaces. `v_sandbox_escape_surface`
+joins Mach-service and entitlement declarations with no recorded profile; its
+`privileged_entitlements` column inventories all joined keys without proving
+privilege or an escape. `v_kernel_attack_surface` selects user-client metadata
+candidates, without proving effective reachability. The query helpers use
+[evidence-limited result labels](../docs/SERVICE_IDENTITY.md).
+
+Migration chain: v2 -> v3 -> v4 -> v5 -> v6. `initialize_database()` and build
+setup apply migrations; read-only consumers leave the input schema untouched.
 
 ---
 

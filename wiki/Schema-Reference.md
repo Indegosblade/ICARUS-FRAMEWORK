@@ -56,7 +56,7 @@ Services, launch daemons, systemd units, IAM identities.
 | group_name | TEXT | Run-as group |
 | run_at_load | INTEGER | Auto-start flag |
 | keep_alive | INTEGER | Restart flag |
-| sandbox_profile | TEXT | Associated sandbox |
+| sandbox_profile | TEXT | Recorded configured profile; missing text does not prove an unsandboxed process |
 | mach_services | TEXT | Registered Mach services |
 | binary_id | INTEGER | FK to binaries |
 | is_disabled | INTEGER | Disabled flag |
@@ -65,7 +65,11 @@ Services, launch daemons, systemd units, IAM identities.
 
 ### mach_services
 
-Normalized launchd `MachServices`. One row per Mach service name a daemon vends — the reachability pivot from a Mach service name to the daemon that answers it. Populates a first-class join instead of parsing the serialized `daemons.mach_services` TEXT blob.
+Normalized launchd `MachServices` declarations. Each row links a configured
+service name to the job declaring it, instead of requiring consumers to parse
+the serialized `daemons.mach_services` TEXT blob. This records configuration,
+not verified registration, runtime client access, or which process answers a
+request.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -222,10 +226,18 @@ Auto-synced via INSERT/DELETE triggers.
 
 | View | What It Shows |
 |------|--------------|
-| v_sandbox_escape_surface | Daemons with Mach services but no launchd sandbox profile (daemon -> binary -> entitlements) |
-| v_kernel_attack_surface | Kexts exposing a user client (has_user_client = 1) |
+| v_sandbox_escape_surface | Legacy Mach-service / entitlement candidate join with no recorded profile; no privilege, access, or escape proof |
+| v_kernel_attack_surface | Kext metadata with has_user_client = 1; user-client candidates, not proven runtime reachability |
 | v_test_binaries | Binaries with test/debug in their path or bundle ID |
+
+The historical `v_sandbox_escape_surface.privileged_entitlements` field contains
+all joined entitlement keys without classifying them as privileged. Schema v6
+retains that physical name for compatibility; the Python `escape_surface()`
+helper exposes it as `entitlement_keys` with a declaration-candidate title.
+Missing profile text is not evidence of an unsandboxed process. See the
+[query evidence and compatibility contract](Query-Reference.md#configuration-evidence-and-compatibility).
 
 ## Migration Chain
 
-v2 -> v3 -> v4 -> v5 -> v6. Applied automatically when opening an older database.
+v2 -> v3 -> v4 -> v5 -> v6. `initialize_database()` and build setup apply the
+migration chain. Read-only query/explorer consumers do not migrate their inputs.
