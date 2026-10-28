@@ -79,6 +79,20 @@ def request(server, path, *, token=True, headers=None, method="GET"):
         conn.close()
 
 
+def test_startup_never_resolves_a_loopback_hostname(database, monkeypatch):
+    def forbidden_lookup(*args, **kwargs):
+        raise AssertionError("Loopback startup must not call socket.getfqdn")
+
+    monkeypatch.setattr(socket, "getfqdn", forbidden_lookup)
+    with running_server(database) as server:
+        assert server.server_name == "127.0.0.1"
+        assert server.server_port == server.server_address[1]
+        assert request(server, "/api/summary", token=False)[0] == 401
+        status, _, body = request(server, "/api/summary")
+        assert status == 200
+        assert json.loads(body)["tables"]["files"] == PAGE_LIMIT + 7
+
+
 def test_auth_origin_and_security_headers(database):
     with running_server(database) as server:
         assert server.server_address[0] == "127.0.0.1"

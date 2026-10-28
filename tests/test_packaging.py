@@ -169,16 +169,23 @@ faulthandler.enable()
 faulthandler.dump_traceback_later(20)
 import http.client
 import json
+import socket
 import sys
 import threading
 from pathlib import Path
 from icarus.core.schema import initialize_database
 from icarus.gui.server import ExplorerServer
 
+def forbidden_hostname_lookup(*args, **kwargs):
+    raise AssertionError('Loopback startup must not call socket.getfqdn')
+
+socket.getfqdn = forbidden_hostname_lookup
 print('Installed GUI: initializing database', file=sys.stderr, flush=True)
 database = Path('installed-gui.db')
 initialize_database(database)
 with ExplorerServer(database, allow_unverified=True) as server:
+    assert server.server_name == '127.0.0.1'
+    assert server.server_port == server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

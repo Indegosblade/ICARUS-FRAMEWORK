@@ -16,6 +16,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from importlib.resources import files
 from pathlib import Path
+from socketserver import TCPServer
 from urllib.parse import parse_qs, urlsplit
 
 from icarus.core import VALID_FTS_TABLES
@@ -169,6 +170,14 @@ class ExplorerServer(HTTPServer):
         super().__init__(("127.0.0.1", port), ExplorerHandler)
         self.origin = f"http://127.0.0.1:{self.server_port}"
         self.url = f"{self.origin}/#token={self.token}"
+
+    def server_bind(self):
+        # HTTPServer's hook calls socket.getfqdn even for a numeric loopback
+        # address. That system resolver operation is unnecessary and unbounded
+        # by our request timeouts because it runs before requests can start.
+        TCPServer.server_bind(self)
+        self.server_name = "127.0.0.1"
+        self.server_port = self.server_address[1]
 
     def check_posture(self):
         status = sanitization_status(self.database)
