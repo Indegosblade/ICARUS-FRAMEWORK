@@ -156,12 +156,12 @@ ctx = pipeline.run()
 
 # Query
 with IcarusQuery("intel.db") as q:
-    q.root_daemons()              # Services running as root without sandbox
-    q.service_map()               # Service -> binary -> permission mapping
-    q.kernel_surface()            # Kernel-reachable entry points
-    q.escape_surface()            # Privilege escalation paths
+    q.root_daemons()              # Explicit root-user declarations; no recorded sandbox profile
+    q.service_map()               # Configured Mach-service declarations
+    q.kernel_surface()            # Kernel user-client metadata candidates
+    q.escape_surface()            # Mach-service / entitlement declaration candidates
     q.mach_service_owners("com.apple.%")               # Mach service -> owning daemon
-    q.daemons_with_entitlement("%iokit-user-client%")  # Daemons holding an entitlement
+    q.daemons_with_entitlement("%iokit-user-client%")  # Services linked to extracted entitlement keys
     results = q.search("config", table="daemons")
 
 # Diff two versions
@@ -448,6 +448,7 @@ icarus-framework/
 | [wiki/CLI-Reference.md](wiki/CLI-Reference.md) | All commands and flags |
 | [wiki/Schema-Reference.md](wiki/Schema-Reference.md) | Full table and column definitions |
 | [wiki/Query-Reference.md](wiki/Query-Reference.md) | Intelligence views, FTS search, SQL patterns |
+| [docs/SERVICE_IDENTITY.md](docs/SERVICE_IDENTITY.md) | Explicit service-user declarations, unknown values, and query evidence limits |
 | [wiki/Parser-Ecosystem.md](wiki/Parser-Ecosystem.md) | Manifests, registry, test harness, quality tiers |
 | [wiki/STIX-Export.md](wiki/STIX-Export.md) | STIX 2.1 mapping, custom extensions, bundle format |
 | [wiki/Validation-Results.md](wiki/Validation-Results.md) | Test run data from real pipeline executions |

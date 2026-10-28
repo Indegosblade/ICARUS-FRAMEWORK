@@ -5,6 +5,7 @@ Single-walk extraction: catalogs files, detects ELF binaries in standard paths,
 parses systemd units, and inventories shared libraries.
 """
 
+import io
 import re
 import struct
 from pathlib import Path
@@ -31,6 +32,7 @@ SYSTEMD_UNIT_DIRS = frozenset({
     "etc/systemd/system",
     "run/systemd/system",
 })
+MAX_SYSTEMD_UNIT_BYTES = 1_000_000
 
 
 class LinuxParser(BaseParser):
@@ -121,13 +123,15 @@ class LinuxParser(BaseParser):
                                 stats["binaries"] += 1
 
                     if is_systemd and ext == ".service":
+                        user, group = _parse_service_identity(path)
                         cur = conn.execute(
                             "INSERT OR IGNORE INTO daemons "
-                            "(label,plist_path,program) VALUES (?,?,?)",
+                            "(label,plist_path,program,user_name,group_name) VALUES (?,?,?,?,?)",
                             (
                                 self._safe_text(path.stem),
                                 rel.lstrip("/"),
                                 _parse_execstart(path),
+                                user, group,
                             ),
                         )
                         if cur.rowcount:
@@ -161,6 +165,63 @@ def _match_dir(rel_dir: str, dir_set: frozenset) -> bool:
 
 
 _EXECSTART_RE = re.compile(r"^\s*ExecStart\s*=\s*(.+)$", re.MULTILINE)
+
+
+def _parse_service_identity(path: Path) -> tuple[str | None, str | None]:
+    """Read explicit [Service] User=/Group= declarations, never runtime identity.
+
+    Scalar assignments replace earlier assignments and an empty value clears
+    the setting. Logical continuations must be consumed even on unrelated
+    directives, so their next physical line cannot impersonate a User= key.
+    Specifiers, quoted text and escapes remain raw; no account lookup,
+    manager defaults, drop-in composition or effective credentials are inferred.
+    """
+    try:
+        st, kind = BaseParser._file_kind(path)
+        if st is None or kind != "regular" or st.st_size > MAX_SYSTEMD_UNIT_BYTES:
+            return None, None
+        with BaseParser._open_regular(path) as handle:
+            raw = handle.read(MAX_SYSTEMD_UNIT_BYTES + 1)
+        if len(raw) > MAX_SYSTEMD_UNIT_BYTES:
+            return None, None
+        text = raw.decode("utf-8-sig")
+    except (OSError, UnicodeError):
+        return None, None
+    if "\0" in text:
+        return None, None
+
+    values: dict[str, str | None] = {"User": None, "Group": None}
+    section: str | None = None
+    for line in _systemd_logical_lines(text):
+        if line.startswith("["):
+            section = line[1:-1] if line.endswith("]") else None
+            continue
+        if section != "Service":
+            continue
+        key, separator, value = line.partition("=")
+        key = key.strip(" \t\r\n")
+        if separator and key in values:
+            value = value.strip(" \t\r\n")
+            values[key] = value if value and len(value) <= 4096 else None
+    return values["User"], values["Group"]
+
+
+def _systemd_logical_lines(text: str):
+    """Join odd trailing-backslash continuations, preserving source value text."""
+    pending: list[str] = []
+    for physical in io.StringIO(text, newline=None):
+        line = physical.rstrip("\r\n")
+        if line.lstrip(" \t\r").startswith(("#", ";")):
+            continue
+        trailing = len(line) - len(line.rstrip("\\"))
+        if trailing % 2:
+            pending.append(line[:-1] + " ")
+            continue
+        pending.append(line)
+        yield "".join(pending).strip(" \t\r\n")
+        pending.clear()
+    if pending:
+        yield "".join(pending).strip(" \t\r\n")
 
 
 def _parse_execstart(path: Path) -> str:

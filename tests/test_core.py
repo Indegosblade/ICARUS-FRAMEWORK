@@ -242,12 +242,14 @@ def test_query_intelligence_views(tmp_db):
 
     initialize_database(tmp_db)
     with IcarusQuery(str(tmp_db)) as q:
-        assert q.root_daemons().query_name == "Root Daemons (No Sandbox)"
+        assert q.root_daemons().query_name == (
+            "Explicit Root User Declarations (No Recorded Sandbox Profile)"
+        )
         assert q.service_map().query_name == "MachService Map"
-        assert q.kernel_surface().query_name == "Kernel Attack Surface"
+        assert q.kernel_surface().query_name == "Kernel User-Client Declaration Candidates"
         assert q.test_binaries().query_name == "Test Binaries in Production"
-        assert q.escape_surface().query_name == "Sandbox Escape Surface"
-        assert q.privileged_entitlements().query_name == "Privileged Entitlements"
+        assert q.escape_surface().query_name == "Mach Service / Entitlement Declaration Candidates"
+        assert q.privileged_entitlements().query_name == "Entitlement Key Inventory"
 
 
 def test_windows_parser():
