@@ -190,6 +190,13 @@ Cross-source canonical identity: the same binary or daemon observed across separ
 icarus resolve --out resolved.db host_a.db host_b.db
 ```
 
+Resolution requires a new output path and frozen, checkpointed source databases.
+It builds into a temporary file and publishes only after independent HYGEIA
+sanitization and final verification, including `--atomize-only` output. Failed or
+unmarked inputs require `--allow-unverified` for recovery; that flag still runs
+the new output's mandatory sanitization gates. Source/output aliases, duplicate
+inputs, and nonempty source WALs are refused.
+
 Every candidate pair considered — not just the ones that merge — is persisted to `match_candidates` with its score and per-field features, and each merged bag's confidence lands in `bags.score`, so a resolution decision is always auditable after the fact. `EntityResolver` remains explicitly experimental (construct it with `experimental=True`, as `icarus resolve` and the optional `icarus build --resolve` phase both do) — see [wiki/CLI-Reference.md](wiki/CLI-Reference.md#icarus-resolve) and [wiki/Schema-Reference.md](wiki/Schema-Reference.md) for the full flag/schema reference.
 
 ---

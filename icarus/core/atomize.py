@@ -141,5 +141,8 @@ def atomize_db(
             rows.close()
         counts[entity_type] = inserted
 
+    if any(counts.values()):
+        from icarus.integrations.hygeia import invalidate_sanitization
+        invalidate_sanitization(out_conn)
     out_conn.commit()
     return counts

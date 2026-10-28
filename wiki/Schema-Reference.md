@@ -108,6 +108,14 @@ Pipeline run provenance. One row per `icarus build` execution.
 | entity_count | INTEGER | Total entities ingested |
 | metadata | TEXT | Optional free-form JSON metadata for the run |
 
+New pipeline runs include `source_identity_sha256` in `versions.metadata`: a
+SHA-256 digest of the run ID and resolved source path. Resume validates that
+identity against the original checkpoint's run and version, even after HYGEIA
+redacts the descriptive `source_path`. Older records without this digest retain
+exact raw-path validation. The digest identifies a path within one run; it is
+neither a source-content hash nor an attestation. Source contents must remain
+immutable across resume, and direct SQL can bypass application invariants.
+
 ## Event Tables
 
 ### observations

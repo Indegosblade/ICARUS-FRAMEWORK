@@ -39,7 +39,12 @@ def _atomic_mutation(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         with self._write_transaction():
-            return method(self, *args, **kwargs)
+            before = self.conn.total_changes
+            result = method(self, *args, **kwargs)
+            if self.conn.total_changes != before:
+                from icarus.integrations.hygeia import invalidate_sanitization
+                invalidate_sanitization(self.conn)
+            return result
     return wrapped
 
 
