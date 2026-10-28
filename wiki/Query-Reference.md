@@ -1,6 +1,6 @@
 # Query Reference
 
-## Intelligence Views
+## Configuration and metadata queries
 
 Pre-built queries via `IcarusQuery`:
 
@@ -14,7 +14,7 @@ with IcarusQuery("intel.db") as q:
     # Configured Mach-service declarations
     q.service_map()
 
-    # Normalized Mach service -> owning daemon (the reachability pivot)
+    # Normalized Mach-service declaration -> declaring daemon
     q.mach_service_owners()
     # ...or filter service names with a SQL LIKE pattern
     q.mach_service_owners("com.apple.%")
@@ -22,7 +22,7 @@ with IcarusQuery("intel.db") as q:
     # Kernel user-client metadata candidates (not proven client reachability)
     q.kernel_surface()
 
-    # Test/debug binaries left in production
+    # Binary names selected by test/debug naming heuristics
     q.test_binaries()
 
     # Mach-service / entitlement declaration candidates (not escalation proof)
@@ -132,7 +132,7 @@ with IcarusQuery("intel.db") as q:
 icarus query intel.db --stats
 ```
 
-Output:
+Illustrative output (counts depend on the database):
 ```
 files: 2,045,000
 binaries: 29,427

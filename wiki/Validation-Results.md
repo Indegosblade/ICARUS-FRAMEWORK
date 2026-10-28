@@ -1,6 +1,9 @@
 # Validation Results
 
-Test run data from actual pipeline executions against real directories and firmware images.
+Historical results from recorded pipeline executions against specific directories
+and firmware images. Version labels identify the original experiments; counts and
+claims below are preserved as historical evidence, not current release validation.
+See the [documentation index](../docs/README.md) for current operating contracts.
 
 ## v1.4.0 — Cross-source entity resolution
 

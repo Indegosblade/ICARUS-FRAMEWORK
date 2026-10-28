@@ -4,7 +4,7 @@ ICARUS uses SQLite with schema version 6. 17 normalized tables, 3 FTS5 indexes, 
 
 ## Entity Tables
 
-All entity tables carry cell-level provenance:
+Entity provenance is recorded as row-level attributes:
 
 | Column | Type | Description |
 |--------|------|-------------|

@@ -1,128 +1,109 @@
-# Getting Started
+# Getting started
 
-## Requirements
+ICARUS builds a local SQLite database from a source snapshot. No database server
+is required. Use Python 3.10+, Git (for the application and pinned HYGEIA
+dependency), and a Python SQLite build with FTS5 support.
 
-| Dependency | Version | Notes |
-|-----------|---------|-------|
-| Python | >= 3.10 | Tested on 3.10, 3.12, 3.13 |
-| SQLite | >= 3.35 | Required for FTS5. Ships with Python on all platforms. |
-| [HYGEIA](https://github.com/Indegosblade/HYGEIA) | v3.15.0 | PII sanitization. Auto-installed from a pinned commit. |
-| [PyYAML](https://pyyaml.org/) | >= 6.0 | Parser manifest loading |
-| [jsonschema](https://python-jsonschema.readthedocs.io/) | >= 4.20 | Manifest validation |
+## Install in a virtual environment
 
-No native extensions or system-level dependencies beyond Python.
+Windows PowerShell:
 
-## Install
-
-```bash
-pip install git+https://github.com/Indegosblade/icarus-framework.git
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install git+https://github.com/Indegosblade/ICARUS-FRAMEWORK.git
 ```
 
-From source:
+Linux or macOS:
+
 ```bash
-git clone https://github.com/Indegosblade/icarus-framework.git
-cd icarus-framework
-pip install .
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install git+https://github.com/Indegosblade/ICARUS-FRAMEWORK.git
 ```
 
-Development (adds pytest, ruff, mypy, bandit):
-```bash
-pip install -e ".[dev]"
-```
-
-## First Scan
+The package installs PyYAML, jsonschema, and a commit-pinned HYGEIA dependency.
+The current integration uses HYGEIA 3.15.1. Inspect the installed ICARUS version
+and available commands:
 
 ```bash
-# Auto-detect parser from source contents
-icarus build --source /path/to/data --output intel.db
-
-# Specify parser explicitly
-icarus build --source "C:\Program Files\MyApp" --output myapp.db --parser windows
-
-# Skip PII sanitization (raw output)
-icarus build --source /data --output raw.db --skip-hygeia
-```
-
-The pipeline:
-1. Auto-detects the best parser (or uses `--parser`)
-2. Extracts entities (files, binaries, daemons, frameworks, etc.)
-3. Maps relationships between entities
-4. Runs HYGEIA sanitization (unless `--skip-hygeia`)
-5. Finalizes provenance (entity count, completion timestamp)
-
-## Query
-
-```bash
-# Full-text search
-icarus query intel.db --search "nginx"
-
-# Table row counts
-icarus query intel.db --stats
-
-# Raw SQL
-icarus query intel.db --sql "SELECT COUNT(*) FROM binaries WHERE arch='x86_64'"
-
-# Search specific table
-icarus query intel.db --search "config" --table daemons
-```
-
-## Diff
-
-```bash
-# Compare two databases
-icarus diff v1.db v2.db
-
-# Write report to file
-icarus diff v1.db v2.db -o report.md
-
-# Export as STIX 2.1 bundle
-icarus diff v1.db v2.db --stix changes.json
-```
-
-## Resolve (experimental)
-
-Merge the same entity observed across multiple builds into one canonical identity:
-
-```bash
-# Atomize two builds and resolve binaries/daemons across them
-icarus resolve --out resolved.db host_a.db host_b.db
-
-# Or resolve within a single build
-icarus build --source /data --output intel.db --resolve
-```
-
-Every scored candidate pair is recorded in `match_candidates` and each merge's confidence in `bags.score`, so a resolution stays auditable. See [[CLI Reference]] for flags and [[Schema Reference]] for the tables.
-
-## Parser Management
-
-```bash
-# List all registered parsers
+python -c "from importlib.metadata import version; print(version('icarus-framework'))"
+icarus --help
 icarus parser list
-
-# Validate a parser manifest
-icarus parser validate icarus/parsers/windows.yaml
-
-# Run parser test harness
-icarus parser test windows
 ```
 
-## Python API
+Installation from the repository follows its default branch. For a reproducible
+deployment, install a reviewed commit by appending `@COMMIT_SHA` to the Git URL
+and record the resulting environment.
 
-```python
-from icarus.core.pipeline import create_default_pipeline
-from icarus.core.query import IcarusQuery
-from icarus.core.differ import IcarusDiffer
+## Build a snapshot
 
-# Build
-p = create_default_pipeline(source, output, parser_name="windows")
-p.run()
+Choose an immutable copy of the source and an output path outside that source:
 
-# Query
-with IcarusQuery("intel.db") as q:
-    q.root_daemons()
-    q.service_map()
-
-# Diff
-with IcarusDiffer("v1.db", "v2.db") as d:
-    report = d.generate_report()
+```bash
+icarus build --source /path/to/snapshot --output intel.db --parser linux
 ```
+
+For a Windows application directory:
+
+```powershell
+icarus build --source "C:\Snapshots\MyApp" --output myapp.db --parser windows
+```
+
+Omit `--parser` to use bounded auto-detection. If the sample budget is exhausted
+or no reliable choice is available, select a parser explicitly. A build extracts
+entities, maps relationships, verifies the schema, sanitizes with HYGEIA,
+finalizes provenance, and performs final verification before marking completion.
+
+Keep the source unchanged until completion. To resume an interruption, repeat the
+same command. Linux and Windows extraction resumes committed batches; other
+parsers replay the interrupted phase. See [ingest recovery](../docs/INGEST_RECOVERY.md)
+for checkpoint ownership and fresh-build behavior. Keep checkpoint files private.
+
+## Inspect the result
+
+```bash
+icarus query intel.db --stats
+icarus query intel.db --search "nginx"
+icarus gui intel.db
+```
+
+The explorer runs on loopback and opens a browser. Use `--no-browser` to print its
+session URL, or `--port 8123` to choose a port. The URL grants access to this
+session; keep it private. Stop the server with Ctrl+C. See
+[local explorer](../docs/ONTOLOGY_EXPLORER.md) for its security and resource limits.
+
+## Compare snapshots
+
+```bash
+icarus diff before.db after.db --output changes.md
+icarus diff before.db after.db --stix changes.json
+```
+
+Keep both databases frozen during comparison. Source databases with uncheckpointed
+WAL data are unsuitable for immutable snapshot reads. See [CLI reference](CLI-Reference.md)
+for experimental cross-source resolution and explicit write commands.
+
+## Understand sanitization status
+
+Verified means the configured sanitization and final verification checks passed.
+It does not guarantee that every form of private information was detected.
+
+- `--skip-hygeia` explicitly creates raw output, recorded as skipped. Consumers
+  permit that intentional exception; it is not verified sanitization.
+- Failed or unmarked output is refused by guarded consumers unless the user
+  explicitly supplies `--allow-unverified` where supported.
+- Writable APIs revoke old audit evidence when data changes. Direct external
+  SQLite writes are outside that guard.
+
+Read the [threat model](../docs/THREAT_MODEL.md) before exporting or sharing a
+database. For older artifacts, follow the version-specific
+[source-identity remediation guide](../docs/SOURCE_IDENTITY_PRIVACY.md).
+
+## Next steps
+
+- [CLI reference](CLI-Reference.md) — every command and option.
+- [Python API](Python-API.md) — build, query, compare, and mutation boundaries.
+- [Query reference](Query-Reference.md) — search and evidence interpretation.
+- [Parser ecosystem](Parser-Ecosystem.md) — supported extensions and test gates.
+- [Documentation index](../docs/README.md) — operations and architecture.
