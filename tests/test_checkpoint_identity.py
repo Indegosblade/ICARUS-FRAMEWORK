@@ -200,6 +200,11 @@ def _legacy_interrupted(source, output):
     pipeline.phases.insert(4, PipelinePhase("interrupt", fail))
     with pytest.raises(RuntimeError):
         pipeline.run()
+    _replace_with_legacy_identity(pipeline, source, output)
+    return pipeline
+
+
+def _replace_with_legacy_identity(pipeline, source, output):
     with closing(sqlite3.connect(output)) as conn:
         conn.execute("UPDATE versions SET metadata=?, source_path='[REDACTED_USER_PATH]/source'",
                      (json.dumps({"source_identity_sha256": _source_identity_digest(
@@ -209,7 +214,6 @@ def _legacy_interrupted(source, output):
         conn.execute("DELETE FROM checkpoint_meta WHERE key IN "
                      "('identity_protocol','identity_state','identity_intent','source_identity_key')")
         conn.commit()
-    return pipeline
 
 
 @pytest.mark.parametrize("stage", ["private_key", "output_hmac"])
@@ -294,6 +298,53 @@ def test_bound_checkpoint_missing_key_fails_closed_without_key_diagnostics(tmp_p
         pytest.fail("Private key appeared in error diagnostics")
     assert output.read_bytes() == before
     assert resumed.checkpoint_db.exists()
+
+
+@pytest.mark.parametrize("binding_interruption", [False, True])
+def test_legacy_completed_sanitize_checkpoint_still_replays_canonical_cleanup(
+    tmp_path, monkeypatch, binding_interruption,
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text('{"kind":"test"}')
+    output = tmp_path / "out.db"
+    old = create_default_pipeline(source, output, "generic/json")
+
+    def keep_checkpoint():
+        raise RuntimeError("injected checkpoint cleanup failure")
+
+    monkeypatch.setattr(old, "_clear_checkpoint", keep_checkpoint)
+    with pytest.raises(RuntimeError, match="checkpoint cleanup"):
+        old.run()
+    _replace_with_legacy_identity(old, source, output)
+    legacy_digest = _metadata(output)["source_identity_sha256"]
+    calls = []
+    original_sanitize = hygeia.sanitize_output
+
+    def tracked_sanitize(path):
+        calls.append(True)
+        return original_sanitize(path)
+
+    monkeypatch.setattr(hygeia, "sanitize_output", tracked_sanitize)
+    if binding_interruption:
+        interrupted = create_default_pipeline(source, output, "generic/json")
+        original_binding = interrupted._persist_version_identity
+
+        def fail_after_binding():
+            original_binding()
+            raise RuntimeError("injected binding interruption")
+
+        monkeypatch.setattr(interrupted, "_persist_version_identity", fail_after_binding)
+        with pytest.raises(RuntimeError, match="binding interruption"):
+            interrupted.run()
+        private = _meta(interrupted.checkpoint_db)
+        assert private["identity_state"] == "bound"
+        assert private["identity_requires_sanitization"] == "1"
+    final = create_default_pipeline(source, output, "generic/json").run()
+    assert final.run_id == old.context.run_id
+    assert calls == [True]
+    assert legacy_digest.encode() not in output.read_bytes()
+    assert hygeia.sanitization_status(output) == "verified"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits; Windows uses directory ACLs")

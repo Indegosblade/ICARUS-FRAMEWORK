@@ -170,6 +170,7 @@ class Pipeline:
         self._source_identity_key: Optional[bytes] = None
         self._recover_empty_output = False
         self._identity_upgrade_pending = False
+        self._identity_requires_sanitization = False
 
     def add_phase(self, name: str, handler: Callable, description: str = "") -> None:
         """Append a processing phase to the pipeline."""
@@ -417,6 +418,8 @@ class Pipeline:
             }
             if self.context.version_id is not None:
                 metadata["version_id"] = str(self.context.version_id)
+            if state == "upgrading":
+                metadata["identity_requires_sanitization"] = "1"
             if self.fingerprint is not None:
                 metadata["fingerprint"] = _canonical_fingerprint(self.fingerprint)
             conn.executemany(
@@ -424,6 +427,8 @@ class Pipeline:
                 metadata.items(),
             )
             conn.commit()
+            if state == "upgrading":
+                self._identity_requires_sanitization = True
         finally:
             conn.close()
 
@@ -601,6 +606,9 @@ class Pipeline:
             conn.close()
 
         metadata = dict(rows)
+        self._identity_requires_sanitization = (
+            metadata.get("identity_requires_sanitization") == "1"
+        )
         if (
             "output_uri" in metadata
             and metadata["output_uri"] != self.output.resolve().as_uri()
@@ -896,6 +904,16 @@ class Pipeline:
                 conn.close()
         self._persist_version_identity()
 
+        if self._identity_requires_sanitization:
+            # Legacy identity removal is a new content write, even when the old
+            # checkpoint already recorded a completed sanitize phase. Keep this
+            # private flag until successful checkpoint removal so every retry
+            # reruns canonical cleanup before publishing current evidence.
+            sanitize = next((index for index, phase in enumerate(self.phases)
+                             if phase.name == "sanitize"), None)
+            if sanitize is not None:
+                start = min(start, sanitize)
+
         print(f"[ICARUS] Pipeline: {len(self.phases)} phases, "
               f"source={self.source}, output={self.output}")
 
@@ -964,6 +982,7 @@ class Pipeline:
                 "total_findings": 0,
             }
         self._clear_checkpoint()
+        self._identity_requires_sanitization = False
 
         total = time.time() - self.context.start_time
         print(f"\n[ICARUS] Pipeline complete. {len(self.phases)} phases in {total:.1f}s")
