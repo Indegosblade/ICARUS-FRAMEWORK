@@ -7,7 +7,7 @@ import socket
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 
 import pytest
 
@@ -16,11 +16,21 @@ from icarus.gui import server as server_module
 from icarus.gui.server import CELL_LIMIT, PAGE_LIMIT, ExplorerServer
 
 
+@contextmanager
+def database_writer(path):
+    # sqlite3.Connection's context manager commits/rolls back but does not
+    # close the handle. Flush WAL before the GUI's read-only byte comparison.
+    with closing(sqlite3.connect(path)) as conn:
+        with conn:
+            yield conn
+        assert conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+
+
 @pytest.fixture
 def database(tmp_path):
     path = tmp_path / "intel.db"
     initialize_database(path)
-    with sqlite3.connect(path) as conn:
+    with database_writer(path) as conn:
         conn.execute(
             "INSERT INTO metadata(key,value) VALUES('hygeia_skipped','true')"
         )
@@ -135,16 +145,16 @@ def test_static_assets_are_local_and_never_bootstrap_the_capability(database):
 
 
 def test_unverified_requires_explicit_override_and_is_rechecked(database):
-    with sqlite3.connect(database) as conn:
+    with database_writer(database) as conn:
         conn.execute("DELETE FROM metadata WHERE key='hygeia_skipped'")
     with pytest.raises(ValueError, match="allow-unverified"):
         ExplorerServer(database)
     with running_server(database, allow_unverified=True) as server:
         assert json.loads(request(server, "/api/summary")[2])["sanitization"] == "unknown"
-    with sqlite3.connect(database) as conn:
+    with database_writer(database) as conn:
         conn.execute("INSERT INTO metadata(key,value) VALUES('hygeia_skipped','true')")
     with running_server(database) as server:
-        with sqlite3.connect(database) as conn:
+        with database_writer(database) as conn:
             conn.execute("DELETE FROM metadata WHERE key='hygeia_skipped'")
         assert request(server, "/api/entities")[0] == 400
 
@@ -176,7 +186,13 @@ def test_trickling_headers_cannot_hold_the_server_indefinitely(database, monkeyp
             sender.start()
             started = time.monotonic()
             try:
-                assert client.recv(1) == b""
+                try:
+                    received = client.recv(1)
+                except (ConnectionResetError, ConnectionAbortedError):
+                    # Windows may reset/abort a socket with unread trickled
+                    # data instead of reporting EOF. Timeouts must still fail.
+                    received = b""
+                assert received == b""
                 assert time.monotonic() - started < 1.5
             finally:
                 stop.set()

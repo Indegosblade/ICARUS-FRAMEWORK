@@ -329,7 +329,8 @@ class ExplorerHandler(BaseHTTPRequestHandler):
             return
         if route.path in ASSETS:
             name, content_type = ASSETS[route.path]
-            self._send(200, files("icarus.gui").joinpath("assets", name).read_bytes(), content_type)
+            asset = files("icarus.gui").joinpath("assets").joinpath(name)
+            self._send(200, asset.read_bytes(), content_type)
             return
         supplied = self.headers.get("Authorization", "")
         if not hmac.compare_digest(supplied.encode(), ("Bearer " + self.server.token).encode()):
