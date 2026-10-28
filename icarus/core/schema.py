@@ -8,12 +8,15 @@ attributes, FTS5 full-text search, and materialized views.
 import platform
 import re
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Optional, Union
 
 
 def _windows_memory_status() -> Optional[tuple]:
     """Return (total_bytes, available_bytes) on Windows, or None on failure."""
+    if sys.platform != "win32":
+        return None
     try:
         import ctypes
 
@@ -31,7 +34,8 @@ def _windows_memory_status() -> Optional[tuple]:
             ]
         stat = MEMORYSTATUSEX()
         stat.dwLength = ctypes.sizeof(stat)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return None
         return stat.ullTotalPhys, stat.ullAvailPhys
     except Exception:
         return None
