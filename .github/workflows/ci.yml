@@ -17,13 +17,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  test-macos-preflight:
+    name: test (macos-latest, 3.12)
     needs: [lint, security, dependency-audit]
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/ -q
+
+  test:
+    needs: [lint, security, dependency-audit, test-macos-preflight]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # Run the affected platform first without duplicating its full suite.
+        exclude:
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -60,7 +79,7 @@ jobs:
       - run: bandit -r icarus/ -c pyproject.toml
 
   package:
-    needs: [lint, security, dependency-audit]
+    needs: [lint, security, dependency-audit, test-macos-preflight]
     # Builds the distribution and exercises the INSTALLED wheel (not an editable
     # install), so a packaging regression that drops runtime data files — parser
     # manifests, the manifest JSON Schema, catalogs — is caught in CI.
