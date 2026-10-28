@@ -18,6 +18,7 @@ from typing import Any, Dict, List
 
 try:
     from hygeia.patterns import PatternRegistry, get_default_registry
+    from hygeia.sqlite_catalog import table_inventory, text_variants
     from hygeia.sqlite_sanitizer import sanitize_database_generic
     try:
         from hygeia.verifier import is_false_positive as _hygeia_is_false_positive
@@ -31,6 +32,8 @@ except ImportError:
     PatternRegistry = None  # type: ignore[assignment,misc]
     get_default_registry = None  # type: ignore[assignment]
     sanitize_database_generic = None  # type: ignore[assignment]
+    table_inventory = None  # type: ignore[assignment]
+    text_variants = None  # type: ignore[assignment]
     _hygeia_is_false_positive = None  # type: ignore[assignment]
     _HAS_HYGEIA_PACKAGE = False
 
@@ -153,7 +156,9 @@ _VALUE_COLUMNS = frozenset({
 _FTS_SOURCE = {"files_fts": "files", "daemons_fts": "daemons", "atoms_fts": "atoms"}
 
 
-def _patterns_for_column(table: str, column: str, regex_patterns: Dict[str, Any]) -> Dict[str, Any]:
+def _patterns_for_column(
+    table: str, column: str, regex_patterns: Dict[str, Any], *, fts: bool = False,
+) -> Dict[str, Any]:
     """Scope patterns to a column.
 
     Value columns and any column of an unknown/extension table get the full
@@ -163,7 +168,8 @@ def _patterns_for_column(table: str, column: str, regex_patterns: Dict[str, Any]
     false-match a version number, filename, or GUID (#76). FTS mirror tables
     inherit their source table's scope.
     """
-    table = _FTS_SOURCE.get(table, table)
+    if fts:
+        table = _FTS_SOURCE.get(table, table)
     if table not in _KNOWN_TABLES or (table, column) in _VALUE_COLUMNS:
         return regex_patterns
     return {
@@ -188,6 +194,8 @@ def require_hygeia() -> Dict[str, str]:
         or PatternRegistry is None
         or get_default_registry is None
         or sanitize_database_generic is None
+        or table_inventory is None
+        or text_variants is None
         or _hygeia_is_false_positive is None
     ):
         raise HygeiaUnavailableError(
@@ -274,44 +282,54 @@ def _redact_scoped(db_path: Path, registry) -> int:
     conn = sqlite3.connect(str(db_path))
     try:
         conn.execute("PRAGMA secure_delete = ON")
-        for table, columns in _get_text_columns(conn).items():
+        inventory = table_inventory(conn)
+        for table, info in inventory.items():
             # FTS virtual tables are rebuilt from the redacted source by
             # _rebuild_fts_indexes; never UPDATE them directly.
-            if table in _FTS_SOURCE:
+            if info.derived or (info.module and info.content is not None):
                 continue
-            for column in columns:
-                patterns = _patterns_for_column(table, column, registry.regex_patterns)
+            all_columns = [col[1] for col in info.columns]
+            for col in sorted(info.columns, key=lambda item: item[6] != 0):
+                column = col[1]
+                patterns = _patterns_for_column(
+                    table, column, registry.regex_patterns, fts=bool(info.module),
+                )
                 if not patterns:
                     continue
                 location = f"{db_path.name}.{table}.{column}"
-                rows = conn.execute(
-                    f"SELECT rowid, {_quote_ident(column)} FROM {_quote_ident(table)} "  # nosec B608 - identifiers are double-quoted and escaped
-                    f"WHERE {_quote_ident(column)} IS NOT NULL"
-                ).fetchall()
-                for rowid, value in rows:
-                    if not isinstance(value, str) or not value:
-                        continue
-                    new_value = value
-                    for name, pattern in patterns.items():
-                        def _replace(match, _name=name):
-                            text = match.group(0)
-                            if _hygeia_is_false_positive(location, _name, text):
-                                return text
-                            return f"[REDACTED_{_name.upper()}]"
+                rows, locator = _scan_rows(conn, table, [column], all_columns)
+                try:
+                    for rowid, value in rows:
+                        for text_value, encoding in text_variants(value):
+                            new_value = text_value
+                            for name, pattern in patterns.items():
+                                def _replace(match, _name=name):
+                                    text = match.group(0)
+                                    if _hygeia_is_false_positive(location, _name, text):
+                                        return text
+                                    return f"[REDACTED_{_name.upper()}]"
 
-                        new_value = pattern.sub(_replace, new_value)
-                    if new_value != value:
-                        try:
-                            conn.execute(
-                                f"UPDATE {_quote_ident(table)} SET {_quote_ident(column)} = ? "  # nosec B608 - identifiers are double-quoted and escaped
-                                f"WHERE rowid = ?",
-                                (new_value, rowid),
-                            )
-                            redacted += 1
-                        except sqlite3.Error:
-                            # Do not abandon the batch (contrast HYGEIA#39); the
-                            # unredacted row is caught by the post-gate below.
-                            continue
+                                new_value = pattern.sub(_replace, new_value)
+                            if new_value == text_value:
+                                continue
+                            if col[6] != 0 or locator is None:
+                                raise SanitizationError(
+                                    "Matched content in a read-only or unsupported SQLite carrier"
+                                )
+                            replacement = new_value.encode(encoding) if encoding else new_value
+                            try:
+                                conn.execute(
+                                    f"UPDATE {_quote_ident(table)} "  # nosec B608 - identifiers quoted; locator fixed alias
+                                    f"SET {_quote_ident(column)} = ? WHERE {locator} = ?",
+                                    (replacement, rowid),
+                                )
+                                redacted += 1
+                            except sqlite3.Error:
+                                # The independent post-gate still sees a failed row.
+                                pass
+                            break
+                finally:
+                    rows.close()
         conn.commit()
     finally:
         conn.close()
@@ -323,35 +341,32 @@ def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _get_text_columns(conn: sqlite3.Connection) -> Dict[str, List[str]]:
+def _get_text_columns(conn: sqlite3.Connection, inventory=None) -> Dict[str, List[str]]:
     """Return scannable columns from every user-facing table, including metadata/FTS."""
-    result: Dict[str, List[str]] = {}
-    tables = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-    ).fetchall()
+    if inventory is None:
+        inventory = table_inventory(conn)
+    return {
+        name: [col[1] for col in info.columns]
+        for name, info in inventory.items() if not info.derived
+    }
 
-    fts_tables = {"files_fts", "daemons_fts", "atoms_fts"}
-    fts_shadow_prefixes = tuple(f"{name}_" for name in fts_tables)
-    for (table_name,) in tables:
-        # The public FTS virtual table exposes the searchable content. Scanning
-        # its internal shadow tables would duplicate findings and inspect BLOBs.
-        if table_name.startswith(fts_shadow_prefixes):
-            continue
 
-        columns = conn.execute(
-            f"PRAGMA table_info({_quote_ident(table_name)})"  # nosec B608 - identifier is double-quoted and embedded quotes are escaped
-        ).fetchall()
-        text_cols = []
-        for col in columns:
-            declared_type = (col[2] or "").upper()
-            if not declared_type or any(
-                text_type in declared_type for text_type in ("TEXT", "VARCHAR", "CHAR", "CLOB")
-            ):
-                text_cols.append(col[1])
-
-        if text_cols:
-            result[table_name] = text_cols
-    return result
+def _scan_rows(conn, table, selected, all_columns):
+    """Use only genuine SQLite rowids as locators, never a user-named rowid."""
+    declared = {name.lower() for name in all_columns}
+    locator = next((name for name in ("_rowid_", "rowid", "oid") if name not in declared), None)
+    columns = ", ".join(_quote_ident(name) for name in selected)
+    quoted_table = _quote_ident(table)
+    try:
+        cursor = conn.execute(
+            f"SELECT {locator or 'NULL'}, {columns} FROM {quoted_table}"  # nosec B608 - names quoted; locator fixed alias
+        )
+    except sqlite3.Error:
+        cursor = conn.execute(
+            f"SELECT NULL, {columns} FROM {quoted_table}"  # nosec B608 - identifiers quoted
+        )
+        locator = None
+    return cursor, locator
 
 
 def _fingerprint(value: str, key: bytes) -> str:
@@ -418,48 +433,42 @@ def _scan_database(db_path: Path, registry, fingerprint_key: bytes) -> Dict[str,
     total_findings = 0
     try:
         _validate_source_identity_policy(conn)
-        for table, columns in _get_text_columns(conn).items():
-            quoted_table = _quote_ident(table)
-            select_list = ", ".join(_quote_ident(column) for column in columns)
+        inventory = table_inventory(conn)
+        for table, columns in _get_text_columns(conn, inventory).items():
             try:
-                cursor = conn.execute(
-                    f"SELECT rowid, {select_list} FROM {quoted_table}"  # nosec B608 - all identifiers are double-quoted and embedded quotes are escaped
-                )
+                cursor, _ = _scan_rows(conn, table, columns, columns)
             except sqlite3.Error:
                 raise SanitizationError(
                     f"Fail-closed verification could not scan table {table!r}"
                 ) from None
 
             scoped = [
-                (column, _patterns_for_column(table, column, registry.regex_patterns))
+                (column, _patterns_for_column(
+                    table, column, registry.regex_patterns, fts=bool(inventory[table].module),
+                ))
                 for column in columns
             ]
             for row in cursor:
                 checked_rows += 1
                 for index, (column, patterns) in enumerate(scoped):
                     value = row[index + 1]
-                    if not isinstance(value, str) or not value:
-                        continue
                     for pattern_name, pattern in patterns.items():
-                        for match in pattern.finditer(value):
-                            match_text = match.group(0)
-                            location = f"{db_path.name}.{table}.{column}"
-                            if _hygeia_is_false_positive(
-                                location, pattern_name, match_text
-                            ):
-                                continue
-                            total_findings += 1
-                            pattern_counts[pattern_name] = pattern_counts.get(pattern_name, 0) + 1
-                            if len(findings) < MAX_RECORDED_FINDINGS:
-                                findings.append(
-                                    {
-                                        "table": table,
-                                        "column": column,
-                                        "rowid": row[0],
-                                        "pattern": pattern_name,
-                                        "fingerprint": _fingerprint(match_text, fingerprint_key),
-                                    }
+                        for match_text, _encoding in text_variants(value):
+                            for match in pattern.finditer(match_text):
+                                raw = match.group(0)
+                                location = f"{db_path.name}.{table}.{column}"
+                                if _hygeia_is_false_positive(location, pattern_name, raw):
+                                    continue
+                                total_findings += 1
+                                pattern_counts[pattern_name] = (
+                                    pattern_counts.get(pattern_name, 0) + 1
                                 )
+                                if len(findings) < MAX_RECORDED_FINDINGS:
+                                    findings.append({
+                                        "table": table, "column": column, "rowid": row[0],
+                                        "pattern": pattern_name,
+                                        "fingerprint": _fingerprint(raw, fingerprint_key),
+                                    })
     finally:
         conn.close()
 
