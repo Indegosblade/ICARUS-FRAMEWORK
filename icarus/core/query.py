@@ -15,6 +15,22 @@ from icarus.core.schema import open_db
 
 QUERY_DISPLAY_LIMIT = 100
 FTS_RESULT_LIMIT = 100
+_WRITE_ACTIONS = frozenset({
+    sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+    sqlite3.SQLITE_CREATE_INDEX, sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_CREATE_TRIGGER,
+    sqlite3.SQLITE_CREATE_VIEW, sqlite3.SQLITE_CREATE_VTABLE,
+    sqlite3.SQLITE_CREATE_TEMP_INDEX, sqlite3.SQLITE_CREATE_TEMP_TABLE,
+    sqlite3.SQLITE_CREATE_TEMP_TRIGGER, sqlite3.SQLITE_CREATE_TEMP_VIEW,
+    sqlite3.SQLITE_DROP_INDEX, sqlite3.SQLITE_DROP_TABLE, sqlite3.SQLITE_DROP_TRIGGER,
+    sqlite3.SQLITE_DROP_VIEW, sqlite3.SQLITE_DROP_VTABLE,
+    sqlite3.SQLITE_DROP_TEMP_INDEX, sqlite3.SQLITE_DROP_TEMP_TABLE,
+    sqlite3.SQLITE_DROP_TEMP_TRIGGER, sqlite3.SQLITE_DROP_TEMP_VIEW,
+    sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_ANALYZE, sqlite3.SQLITE_REINDEX,
+})
+_READ_PRAGMAS_WITH_ARGUMENT = frozenset({
+    "table_info", "table_xinfo", "table_list", "index_info", "index_xinfo", "index_list",
+    "foreign_key_list", "foreign_key_check", "integrity_check", "quick_check",
+})
 
 
 class QueryResult:
@@ -83,6 +99,10 @@ class IcarusQuery:
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {db_path}")
         self.writable = writable
+        self._write_pending = False
+        self._executing_writable = False
+        self._guarding_statement = False
+        self._statement_writes = False
         # open_db() enables foreign_keys enforcement and scales cache/mmap
         # pragmas to available RAM on this long-lived working connection
         # (see icarus.core.schema.open_db).
@@ -116,12 +136,117 @@ class IcarusQuery:
         return sqlite3.SQLITE_OK
 
     def commit(self) -> None:
-        """Commit pending changes (only meaningful on a writable connection)."""
+        """Publish guarded writes and their trust revocation together."""
+        if self._executing_writable:
+            raise sqlite3.ProgrammingError(
+                "Transaction control during a guarded statement is unsupported"
+            )
+        if self.writable and self._write_pending and self.conn.in_transaction:
+            self._invalidate_write_trust()
         self.conn.commit()
+        self._write_pending = False
+
+    def rollback(self) -> None:
+        """Discard pending guarded writes and restore their prior trust state."""
+        if self._executing_writable:
+            raise sqlite3.ProgrammingError(
+                "Transaction control during a guarded statement is unsupported"
+            )
+        self.conn.rollback()
+        self._write_pending = False
+
+    def _write_authorizer(self, action, arg1, arg2, _database, _trigger):
+        if self._guarding_statement:
+            # A SQL COMMIT/ROLLBACK/RELEASE must not escape the statement guard.
+            # Raw connection management remains available to the existing CLI.
+            if action in (sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT,
+                          sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH):
+                return sqlite3.SQLITE_DENY
+            if action in _WRITE_ACTIONS:
+                self._statement_writes = True
+            elif action == sqlite3.SQLITE_PRAGMA:
+                name = (arg1 or "").lower()
+                if ((arg2 is not None and name not in _READ_PRAGMAS_WITH_ARGUMENT)
+                        or name in {"optimize", "incremental_vacuum", "wal_checkpoint"}):
+                    self._statement_writes = True
+        return sqlite3.SQLITE_OK
+
+    def _invalidate_write_trust(self):
+        # Dropping metadata removes the evidence itself. If it still exists,
+        # failed revocation must fail the write rather than silently bless it.
+        if self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'metadata'"
+        ).fetchone() is not None:
+            from icarus.integrations.hygeia import invalidate_sanitization
+            invalidate_sanitization(self.conn)
+
+    def _execute_writable(self, sql: str, params: tuple) -> QueryResult:
+        if self._executing_writable:
+            raise sqlite3.ProgrammingError("Recursive guarded statements are not supported")
+        self._executing_writable = True
+        try:
+            return self._execute_writable_statement(sql, params)
+        finally:
+            self._executing_writable = False
+
+    def _execute_writable_statement(self, sql: str, params: tuple) -> QueryResult:
+        owned_transaction = not self.conn.in_transaction
+        if owned_transaction:
+            self._write_pending = False
+            self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("SAVEPOINT icarus_query_statement")
+        cursor = None
+        try:
+            self._statement_writes = False
+            # Reinstalling the authorizer expires cached preparations, so a
+            # repeated statement is authorized again in the next transaction.
+            self.conn.set_authorizer(self._write_authorizer)
+            self._guarding_statement = True
+            try:
+                cursor = self.conn.execute(sql, params)
+                result = self._consume_result(cursor)
+            finally:
+                try:
+                    if cursor is not None:
+                        cursor.close()  # Finalize RETURNING before savepoint release.
+                finally:
+                    self._guarding_statement = False
+            if self._statement_writes:
+                self._invalidate_write_trust()
+            self.conn.execute("RELEASE SAVEPOINT icarus_query_statement")
+            if self._statement_writes:
+                self._write_pending = True
+            elif owned_transaction:
+                self.conn.rollback()  # A read does not retain a writer transaction.
+            return result
+        except BaseException:
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK TO SAVEPOINT icarus_query_statement")
+                self.conn.execute("RELEASE SAVEPOINT icarus_query_statement")
+                if owned_transaction:
+                    self.conn.rollback()
+            if not self.conn.in_transaction:
+                self._write_pending = False
+            raise
 
     def execute(self, sql: str, params: tuple = ()) -> QueryResult:
-        """Execute raw SQL with a bounded result set for terminal display."""
+        """Execute one statement; writable changes remain pending until commit().
+
+        Guarded writes revoke sanitizer evidence atomically. Transaction SQL,
+        attachments, and nontransactional operations are not supported here;
+        use commit()/rollback() for this connection's transaction lifecycle.
+        Direct raw-connection/cursor writes bypass this contract.
+        """
+        if self.writable:
+            return self._execute_writable(sql, params)
         cursor = self.conn.execute(sql, params)
+        try:
+            return self._consume_result(cursor)
+        finally:
+            cursor.close()
+
+    @staticmethod
+    def _consume_result(cursor) -> QueryResult:
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
         rows = [tuple(row) for row in cursor.fetchmany(QUERY_DISPLAY_LIMIT + 1)]
         truncated = len(rows) > QUERY_DISPLAY_LIMIT
@@ -353,7 +478,12 @@ class IcarusQuery:
         return counts
 
     def close(self) -> None:
+        if self._executing_writable:
+            raise sqlite3.ProgrammingError("Closing during a guarded statement is unsupported")
+        # SQLite closes by rolling back an uncommitted transaction, including
+        # its pending trust revocation. Native close also remains idempotent.
         self.conn.close()
+        self._write_pending = False
 
     def __enter__(self):
         return self
