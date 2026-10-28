@@ -746,12 +746,12 @@ def test_merge_bags_shared_atom_does_not_raise(tmp_db):
             ).fetchall()
             assert [r_[0] for r_ in rows] == [a1, a2, a3]
 
-            # The losing bag's rows are fully gone.
+            # Membership is gone; the empty bag remains the historical FK target.
             assert conn.execute(
                 "SELECT COUNT(*) FROM bag_atoms WHERE bag_id = ?", (b2,)
             ).fetchone()[0] == 0
             assert conn.execute(
-                "SELECT COUNT(*) FROM bags WHERE id = ?", (b2,)
+                "SELECT atom_count FROM bags WHERE id = ?", (b2,)
             ).fetchone()[0] == 0
 
             atom_count = conn.execute(

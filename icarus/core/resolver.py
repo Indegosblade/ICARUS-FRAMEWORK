@@ -22,21 +22,31 @@ docstring for details).
 import json
 import math
 import warnings
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from functools import wraps
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from icarus.core.matching import candidate_pairs, cluster, score_pair
 from icarus.core.schema import open_db
 
-# Explicit experimental flag for the atom/bag/resolver subsystem: it is not
-# wired into the default pipeline and its API/behavior are unstable.
+# Explicit experimental flag: resolution is opt-in and its API/behavior are unstable.
 __experimental__ = True
+
+
+def _atomic_mutation(method):
+    """Lock before validating, and preserve a caller-owned outer transaction."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._write_transaction():
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 class EntityResolver:
     """Resolve entities across sources using the Atom/Bag/EventLog pattern.
 
-    EXPERIMENTAL: not wired into ``create_default_pipeline``. Pass
+    EXPERIMENTAL: enabled by ``icarus resolve`` or ``build --resolve``. Pass
     ``experimental=True`` to acknowledge the unstable API; omitting it emits a
     warning rather than failing, so existing callers keep working.
     """
@@ -44,8 +54,7 @@ class EntityResolver:
     def __init__(self, db_path: str, *, experimental: bool = False):
         if not experimental:
             warnings.warn(
-                "EntityResolver is an experimental, unwired subsystem "
-                "(not part of create_default_pipeline); pass experimental=True "
+                "EntityResolver is an experimental subsystem; pass experimental=True "
                 "to acknowledge its unstable API.",
                 stacklevel=2,
             )
@@ -55,6 +64,38 @@ class EntityResolver:
         # of a bare sqlite3.connect that silently left REFERENCES unenforced.
         self.conn = open_db(db_path)
 
+    @contextmanager
+    def _write_transaction(self):
+        """Serialize resolver decisions before reading mutable membership.
+
+        A top-level call owns a BEGIN IMMEDIATE transaction. Nested calls and
+        callers with an existing transaction get a savepoint instead, so this
+        API never commits unrelated caller writes. An empty DML statement
+        obtains the write lock for a caller's deferred transaction before any
+        membership validation; a stale WAL snapshot fails safely at that point.
+        """
+        nested = self.conn.in_transaction
+        if nested:
+            self.conn.execute("SAVEPOINT icarus_resolver_mutation")
+        else:
+            self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            if nested:
+                self.conn.execute("UPDATE bags SET atom_count = atom_count WHERE 0")
+            yield
+            if nested:
+                self.conn.execute("RELEASE SAVEPOINT icarus_resolver_mutation")
+            else:
+                self.conn.commit()
+        except BaseException:
+            if nested:
+                self.conn.execute("ROLLBACK TO SAVEPOINT icarus_resolver_mutation")
+                self.conn.execute("RELEASE SAVEPOINT icarus_resolver_mutation")
+            else:
+                self.conn.rollback()
+            raise
+
+    @_atomic_mutation
     def ingest_atom(
         self, version_id: int, entity_type: str, source_key: str, properties: dict
     ) -> int:
@@ -65,11 +106,11 @@ class EntityResolver:
             "properties, created_at) VALUES (?, ?, ?, ?, ?)",
             (version_id, entity_type, source_key, json.dumps(properties), now),
         )
-        self.conn.commit()
         atom_id = cursor.lastrowid
         assert atom_id is not None
         return atom_id
 
+    @_atomic_mutation
     def create_bag(
         self, entity_type: str, atom_ids: List[int], canonical_key: Optional[str] = None
     ) -> int:
@@ -101,7 +142,7 @@ class EntityResolver:
             )
 
         now = datetime.now(timezone.utc).isoformat()
-        with self.conn:
+        with self._write_transaction():
             cursor = self.conn.execute(
                 "INSERT INTO bags (entity_type, canonical_key, created_at, atom_count) "
                 "VALUES (?, ?, ?, ?)",
@@ -117,8 +158,9 @@ class EntityResolver:
             self._log_event("create", bag_id, atom_ids, "initial bag creation")
         return bag_id
 
+    @_atomic_mutation
     def merge_bags(self, bag_ids: List[int], reason: str = "") -> int:
-        """Merge multiple bags into one. Logs BEFORE modifying. Returns surviving bag_id."""
+        """Merge current bags; retain empty source bags and their immutable history."""
         bag_ids = list(dict.fromkeys(bag_ids))
         if len(bag_ids) < 2:
             raise ValueError("merge_bags requires at least 2 bag IDs")
@@ -135,24 +177,33 @@ class EntityResolver:
         if len(set(found.values())) != 1:
             raise ValueError("Cannot merge bags with different entity types")
 
+        empty = [
+            bag_id for bag_id in bag_ids
+            if self.conn.execute(
+                "SELECT 1 FROM bag_atoms WHERE bag_id = ? LIMIT 1", (bag_id,)
+            ).fetchone() is None
+        ]
+        if empty:
+            raise ValueError(f"Bags have no current members (already retired): {empty}")
+
         surviving_id = bag_ids[0]
 
-        all_atom_ids = []
+        all_atom_ids: list[int] = []
         for bag_id in bag_ids:
             rows = self.conn.execute(
                 "SELECT atom_id FROM bag_atoms WHERE bag_id = ?", (bag_id,)
             ).fetchall()
             all_atom_ids.extend(r[0] for r in rows)
 
-        with self.conn:
-            self._log_event("merge", surviving_id, all_atom_ids, reason)
+        with self._write_transaction():
+            self._log_event("merge", surviving_id, sorted(set(all_atom_ids)), reason)
 
             for bag_id in bag_ids[1:]:
                 # bag_atoms has PRIMARY KEY(bag_id, atom_id): if the losing and
                 # surviving bags already share an atom, a plain
                 # "UPDATE ... SET bag_id" re-points that shared row onto a key
                 # that already exists under surviving_id and raises
-                # IntegrityError. INSERT OR IGNORE + delete-the-loser is safe
+                # IntegrityError. INSERT OR IGNORE + clear-the-loser is safe
                 # either way — a shared atom simply collapses to the one row
                 # already present under surviving_id.
                 self.conn.execute(
@@ -164,21 +215,28 @@ class EntityResolver:
                     "DELETE FROM bag_atoms WHERE bag_id = ?",
                     (bag_id,),
                 )
+                # Keep the original bag as an empty historical FK target.
+                # Repointing its events would falsify past decisions; deleting
+                # it would either orphan history or fail FK enforcement.
                 self.conn.execute(
-                    "UPDATE resolution_event_log SET bag_id = ? WHERE bag_id = ?",
-                    (surviving_id, bag_id),
+                    "UPDATE bags SET atom_count = 0, resolved_at = ? WHERE id = ?",
+                    (datetime.now(timezone.utc).isoformat(), bag_id),
                 )
-                self.conn.execute("DELETE FROM bags WHERE id = ?", (bag_id,))
+                self._log_event(
+                    "merge_into", bag_id, [],
+                    json.dumps({"surviving_bag_id": surviving_id, "reason": reason}),
+                )
 
             total = self.conn.execute(
                 "SELECT COUNT(*) FROM bag_atoms WHERE bag_id = ?", (surviving_id,)
             ).fetchone()[0]
             self.conn.execute(
-                "UPDATE bags SET atom_count = ?, resolved_at = ? WHERE id = ?",
+                "UPDATE bags SET atom_count = ?, resolved_at = ?, score = NULL WHERE id = ?",
                 (total, datetime.now(timezone.utc).isoformat(), surviving_id),
             )
         return surviving_id
 
+    @_atomic_mutation
     def split_bag(self, bag_id: int, atom_ids_to_remove: List[int], reason: str = "") -> int:
         """Remove atoms from a bag into a new bag. Does NOT delete original. Returns new bag_id."""
         atom_ids_to_remove = list(dict.fromkeys(atom_ids_to_remove))
@@ -204,7 +262,7 @@ class EntityResolver:
         if requested == members:
             raise ValueError("split_bag cannot remove every atom from the original bag")
 
-        with self.conn:
+        with self._write_transaction():
             self._log_event("split", bag_id, atom_ids_to_remove, reason)
             cursor = self.conn.execute(
                 "INSERT INTO bags (entity_type, created_at, atom_count) VALUES (?, ?, ?)",
@@ -212,6 +270,11 @@ class EntityResolver:
             )
             new_bag_id = cursor.lastrowid
             assert new_bag_id is not None
+
+            self._log_event(
+                "split_from", new_bag_id, atom_ids_to_remove,
+                json.dumps({"source_bag_id": bag_id, "reason": reason}),
+            )
 
             placeholders = ",".join("?" for _ in atom_ids_to_remove)
             self.conn.execute(
@@ -222,11 +285,12 @@ class EntityResolver:
 
             remaining = len(members) - len(requested)
             self.conn.execute(
-                "UPDATE bags SET atom_count = ?, resolved_at = ? WHERE id = ?",
+                "UPDATE bags SET atom_count = ?, resolved_at = ?, score = NULL WHERE id = ?",
                 (remaining, now, bag_id),
             )
         return new_bag_id
 
+    @_atomic_mutation
     def resolve(
         self, entity_type: str, blocking_keys: List[str]
     ) -> Dict[str, Any]:
@@ -278,6 +342,7 @@ class EntityResolver:
 
         return {"merges": merges, "atoms_resolved": atoms_resolved}
 
+    @_atomic_mutation
     def resolve_scored(
         self,
         entity_type: str,
@@ -386,7 +451,6 @@ class EntityResolver:
         for atom_id in sorted(unresolved - clustered):
             self.create_bag(entity_type, [atom_id])
 
-        self.conn.commit()
         return {
             "clusters": len(components),
             "merges": len(match_edges),

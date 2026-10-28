@@ -4,3 +4,6 @@ recursive-include icarus *.yaml
 recursive-include icarus *.json
 recursive-include icarus/parsers/selftest *
 include icarus/py.typed
+# Git ignore rules do not control setuptools' source manifest.
+prune icarus/parsers/private
+global-exclude *.py[cod]

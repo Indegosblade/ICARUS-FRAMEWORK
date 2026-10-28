@@ -167,13 +167,13 @@ class IcarusDiffer:
         # Diff never writes: open both databases immutable read-only via URI so
         # an untrusted export can never be mutated (and no -wal/-shm is created).
         self.conn = sqlite3.connect(
-            f"file:{self.new_path}?mode=ro&immutable=1", uri=True
+            self.new_path.resolve().as_uri() + "?mode=ro&immutable=1", uri=True
         )
         try:
             self.conn.row_factory = sqlite3.Row
             self.conn.execute(
                 "ATTACH DATABASE ? AS old_db",
-                (f"file:{self.old_path}?mode=ro&immutable=1",),
+                (self.old_path.resolve().as_uri() + "?mode=ro&immutable=1",),
             )
         except Exception:
             self.conn.close()
@@ -616,8 +616,8 @@ class IcarusDiffer:
         for record in new_records:
             new_by_identity[record["identity"]].append(record)
 
-        added = []
-        removed = []
+        added: list[dict] = []
+        removed: list[dict] = []
         changed = []
         identities = set(old_by_identity) | set(new_by_identity)
         for identity in sorted(
@@ -826,6 +826,7 @@ class IcarusDiffer:
         atom ids listed in the event log are never compared (they carry no
         cross-database meaning). Bags with no ``canonical_key`` (not yet
         resolved) have no stable cross-version identity and are excluded.
+        Empty historical bags retained after a merge are excluded too.
 
         Reports resolved entities added/removed, and — for bags present in both
         versions — a change when the clustered ``atom_count`` or ``score``
@@ -836,7 +837,7 @@ class IcarusDiffer:
                 (r["entity_type"], r["canonical_key"]): dict(r)
                 for r in self.conn.execute(
                     f"SELECT entity_type, canonical_key, atom_count, score "  # nosec B608 - schema is a fixed literal ('main'/'old_db')
-                    f"FROM {schema}.bags WHERE canonical_key IS NOT NULL"
+                    f"FROM {schema}.bags WHERE canonical_key IS NOT NULL AND atom_count > 0"
                 )
             }
 

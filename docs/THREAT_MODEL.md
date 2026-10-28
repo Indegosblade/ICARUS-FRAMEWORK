@@ -45,27 +45,36 @@ actor require an authenticated delivery channel or external signature.
 |---|---|---|---|
 | AC1 | In-root symlink points outside the tree; parser reads host files into A2/A3 | symlinks cataloged, never dereferenced or traversed | **Fixed/merged (#43 → #62)** |
 | AC2 | Secret in A1 ends up in A3 and is shared as "clean" | HYGEIA canonical + fail-closed + mandatory post-sanitize gate | **Fixed/merged (#41/#42 → #59)** |
-| AC3 | Malformed/huge/nested input exhausts memory or hangs the run | FIFO skip, surrogate-escape, depth/decompression budgets | **Fixed/merged (#47 → #62)** — residual: cloudtrail size cap (#25) |
-| AC4 | Hostile file **name/path** injects into the diff Markdown report | none | **Open (#35)** |
+| AC3 | Malformed/huge/nested input exhausts memory or hangs the run | Format-specific read, nesting, archive and detection budgets | Parser extraction still enumerates each directory; resolver candidate sets scale with corpus size |
+| AC4 | Hostile file **name/path** injects into the diff Markdown report | Shared Markdown escaping and bounded display | Regression coverage in `test_query_markdown.py`; a report is evidence, not executable input |
 | AC5 | Recipient trusts an invalid STIX bundle / dangling refs | deterministic RFC-4122 `uuid5` ids, valid refs/timestamps | **Fixed/merged (#21 → #61)** |
 | AC6 | Consumer acts on a false "moved"/"reassigned" diff edge | natural-key diff throughout | **Fixed/merged — structural_diff + observation_diff + stable entitlement owner (#38)** |
-| AC7 | Untrusted **SQLite** input opened read-write / runs on hostile DB | diff opens `mode=ro&immutable=1` | Diff safe; verify `sqlite_parser`/`query` paths |
-| AC8 | Malicious entry-point plugin executes on import | Python trust model | Document + consider opt-in plugin loading |
-| AC9 | Dependency tag moved / unreproducible build | version pin (tag) | **Movable tag; git-URL dep (#32/#49)** |
+| AC7 | Untrusted **SQLite** input opened read-write / runs on hostile DB | Encoded file URIs; diff/catalog use immutable read-only inputs; query uses read-only plus `query_only` and denies ATTACH | Immutable readers require a frozen, checkpointed database; SQLite itself remains a trusted runtime dependency |
+| AC8 | Malicious entry-point plugin executes on import | Plugins are trusted Python code | Install and run only trusted parser packages; this is not a plugin sandbox |
+| AC9 | Dependency revision moves / local extensions enter release artifacts | HYGEIA dependency pinned to a full commit; actions pinned to commits; private parser package excluded from wheel and sdist | VCS dependency is outside PyPI vulnerability auditing; build dependencies are not fully locked |
 | AC10 | Orphan/inconsistent FK data persisted silently | schema `REFERENCES` + enforced pragma | **Fixed/merged — FK ON on every write path + verify-phase `foreign_key_check` gate (#54)** |
+| AC11 | Competing builds overwrite checkpoint identity or replace an active output | Process-held output lease across build and final replacement | Cooperating ICARUS writers only; arbitrary external SQLite writers are not governed by this lease |
+| AC12 | Resolver mutation destroys history or assigns one atom to competing bags | Preserve historical bag rows; append events; acquire write ownership before validating membership | Application-level invariants; direct SQL can bypass resolver policy |
 
 ## Confidentiality / Integrity / Availability / Supply-chain split
 
-- **Confidentiality:** AC1 (symlink read-out), AC2 (secret leak), SAN-07 (verifier echoes
-  secret). **Highest-priority class — two blockers.**
+- **Confidentiality:** AC1 (source-boundary reads), AC2 (secret leak), AC9 (distribution
+  boundaries). Findings record fingerprints rather than raw matched secrets.
 - **Integrity:** AC5 (invalid STIX → fixed #61), AC6 (false diffs → fixed #38), AC10
   (orphan FKs → fixed #54), provenance (#40 → fixed #60), forward-version relabel
-  (#39 → fixed #53). Residual: checkpoint wrong-DB (#45).
+  (#39 → fixed #53). Resume validates source/parser/config and original run identity.
 - **Availability:** AC3 (DoS via hostile input, #47).
-- **Supply-chain:** AC8 (plugins), AC9 (git dep + mutable action pins, #49).
+- **Supply-chain:** AC8 (trusted plugins), AC9 (VCS dependency and build reproducibility).
 
-## Accepted residual risk (owner to ratify)
+## Operational assumptions and residual limits
 
-- Entry-point plugin execution is inherent to Python packaging (document it).
-- The noncommercial license and private-repo status limit exposure *today*; a public
-  release removes that mitigation and makes AC1–AC5 live.
+- Source contents must remain immutable during a resumable build. Path/config
+  fingerprints do not prove source-content identity.
+- A successful pattern-based sanitization gate means no residual matched the active
+  policy. It does not establish that every possible secret or personal identifier
+  was recognized. Review sharing policy for the actual source and recipient.
+- File traversal and no-follow checks defend against static links/reparse points.
+  A concurrently hostile source requires stronger OS isolation; the parser is not
+  a filesystem snapshot or a sandbox.
+- The repository is public. Neither its license nor limited adoption mitigates
+  malicious input or exposure of output data.

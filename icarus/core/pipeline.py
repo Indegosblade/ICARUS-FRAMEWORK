@@ -11,8 +11,9 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
+from icarus.core.build_lock import output_lease
 from icarus.core.schema import ENTITY_TABLES, open_db
 
 PROVENANCE_ENTITY_TABLES = (*ENTITY_TABLES, "mach_services")
@@ -103,9 +104,9 @@ class PipelineContext:
         self.output_db = output_db
         self.parser_name = parser_name
         self.start_time = time.time()
-        self.phase_times = {}
-        self.stats = {}
-        self.errors = []
+        self.phase_times: dict[str, float] = {}
+        self.stats: dict[str, Any] = {}
+        self.errors: list[tuple[str, str]] = []
         self.version_id: Optional[int] = None
         self.run_id: str = str(uuid.uuid4())
 
@@ -459,6 +460,10 @@ class Pipeline:
             resume: If True, skip completed phases (default behavior).
             start_phase: Force start from this phase index (overrides resume).
         """
+        with output_lease(self.output):
+            return self._run(resume=resume, start_phase=start_phase)
+
+    def _run(self, resume: bool = True, start_phase: Optional[int] = None) -> "PipelineContext":
         restored_identity = resume and self.checkpoint_db.exists()
         if restored_identity:
             self._validate_fingerprint()
