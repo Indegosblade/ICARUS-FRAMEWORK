@@ -30,7 +30,13 @@ An earlier version of the harness had only the all-distinct `new` negative. An a
 
 The **`confusable_strong` negative encodes the core tension**: a different binary at the same name and path, differing only in content, is **indistinguishable on features from a recompiled version of the same binary**. They score identically. Therefore you cannot lower the threshold to recover `recompile` recall without simultaneously admitting these false positives. The threshold is the dial on that trade-off; there is no setting that gets both.
 
-## Measured findings (27 real Linux binaries, synthetic perturbations)
+## Historical measured findings (27 real Linux binaries, synthetic perturbations)
+
+These tables preserve results from one recorded experiment; they are not a
+universal calibration for other corpora.
+
+These tables preserve results from the recorded experiment; they are not a
+current universal calibration for other corpora.
 
 | threshold | precision | recall | F1 | notes |
 |----------:|----------:|-------:|----:|-------|
@@ -38,19 +44,19 @@ The **`confusable_strong` negative encodes the core tension**: a different binar
 | **0.60** | **1.00** | **0.73** | 0.84 | **calibrated** — precision-first floor; recovers `rename` recall |
 | 0.85 (default) | 1.00 | 0.59 | 0.74 | precision-safe but conservative; misses `recompile` + `rename` |
 
-- **Precision is intact (1.0) at the default 0.85** against every hard negative tested — the default is validated as *precision-safe*.
+- Precision was 1.0 at the default 0.85 against the hard negatives in this recorded corpus. This does not establish precision for other corpora.
 - It is also *conservative*: on this dataset ~0.60 keeps precision 1.0 while recovering `rename` recall (0.73 vs 0.59). Going below ~0.55 admits the strong confusables (precision falls to ~0.84).
 - Per-mutation recall at a moderate threshold: `identical`/`move` 1.0, `rename` ~0.75, `recompile` recoverable only below ~0.54 (where precision starts to pay).
 
 ## Decision
 
-**Keep `threshold=0.85` as the default.** It is measured-precision-safe and robust — it sits well above any realistic confusable score, so it does not depend on the particular scores of one dataset's negatives. Lowering the global default to the calibrated `~0.60` would overfit to a single dataset's synthetic perturbations; the calibrated value depends on how the hard negatives happen to score, which varies by corpus.
+**Keep `threshold=0.85` as the default.** It retained precision on the recorded corpus. That result does not establish a safe threshold for other corpora. Lowering the global default to the calibrated `~0.60` would overfit to a single dataset's synthetic perturbations; the calibrated value depends on how the hard negatives happen to score, which varies by corpus.
 
 The heuristic weights are likewise **kept** — the measurements show them producing precision 1.0 with sensible recall degradation exactly where the features genuinely stop distinguishing entities (recompiles). That "we kept the heuristics" is itself a measured, defensible result, not an untested guess. Learned weights (Fellegi-Sunter m/u or logistic regression over the per-field features already persisted in `match_candidates.features`) remain a data-driven option **if** a future corpus's measurements show the heuristics leaving accuracy on the table.
 
 **Operators who need more recall** should not blindly lower the default — they should run `resolver_eval` on their own corpus and pick the `calibrate_threshold` value for it, then pass `--threshold` (CLI) or `threshold=` (`resolve_scored`). The precision floor is a policy choice; make it with numbers.
 
-## Real two-dump validation
+## Historical real two-dump validation
 
 The synthetic harness is confirmed on genuinely different real dumps. Two dumps were built from real `/usr/bin` ELF binaries — dump A (50 binaries) and dump B = A with **real, controlled** drift (recompile = appended bytes → a real SHA-256 change at the same name/path; rename; 10 genuinely-new binaries; 10 deleted) — then run through the full pipeline (`icarus build` × 2 → `icarus resolve`) and scored against the exact ground truth we constructed.
 

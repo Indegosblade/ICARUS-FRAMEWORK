@@ -6,7 +6,8 @@ ICARUS extracts entities and recorded relationships from filesystem snapshots an
 structured logs into a queryable SQLite database. Use it to inspect a source,
 compare snapshots, browse provenance, and export supported entities as STIX 2.1.
 
-**Status:** beta, source-available under [PolyForm Noncommercial 1.0.0](LICENSE).
+**Current release:** [4.0.0b3 beta](https://github.com/Indegosblade/ICARUS-FRAMEWORK/releases/tag/v4.0.0b3),
+source-available under [PolyForm Noncommercial 1.0.0](LICENSE).
 Interfaces may change. Entity resolution is experimental. The current data model
 is schema v6; [ontology v7](docs/ONTOLOGY_DESIGN.md) is a design proposal.
 
@@ -22,14 +23,14 @@ Use Python 3.10 or newer, Git, and a Python SQLite build with FTS5. Create and
 activate a virtual environment, then install:
 
 ```bash
-python -m pip install git+https://github.com/Indegosblade/ICARUS-FRAMEWORK.git
+python -m pip install git+https://github.com/Indegosblade/ICARUS-FRAMEWORK.git@v4.0.0b3
 icarus build --source /path/to/snapshot --output intel.db
 icarus query intel.db --stats
 icarus gui intel.db
 ```
 
-Keep the source immutable during a build or resume. The build selects a parser
-from a bounded source sample; use `--parser NAME` if detection is inconclusive.
+Keep the source immutable during a build or resume. Built-in parsers share a
+bounded detection sample; use `--parser NAME` if detection is inconclusive.
 Run `icarus parser list` for the installed parser inventory.
 
 The explorer opens a read-only, single-user browser interface on `127.0.0.1`.

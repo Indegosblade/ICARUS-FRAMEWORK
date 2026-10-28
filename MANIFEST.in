@@ -4,6 +4,12 @@ recursive-include icarus *.yaml
 recursive-include icarus *.json
 recursive-include icarus/parsers/selftest *
 include icarus/py.typed
+# Public documentation linked by README and project metadata.
+include README.md CONTRIBUTING.md SECURITY.md CHANGELOG.md
+recursive-include about *.md
+recursive-include docs *.md
+recursive-include wiki *.md
+include schema/icarus_schema.sql
 # Git ignore rules do not control setuptools' source manifest.
 prune icarus/parsers/private
 global-exclude *.py[cod]

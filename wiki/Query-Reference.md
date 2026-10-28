@@ -75,6 +75,8 @@ icarus query intel.db --search "nginx" --table daemons
 ```
 
 ```python
+from icarus.core.query import IcarusQuery
+
 with IcarusQuery("intel.db") as q:
     results = q.search("nginx", table="daemons")
     print(results.to_markdown())
@@ -97,6 +99,8 @@ icarus query intel.db --sql "SELECT filename, size FROM files WHERE size > 10000
 ```
 
 ```python
+from icarus.core.query import IcarusQuery
+
 with IcarusQuery("intel.db") as q:
     results = q.execute("SELECT COUNT(*) as cnt, arch FROM binaries GROUP BY arch ORDER BY cnt DESC")
     print(results.to_markdown())
@@ -109,7 +113,12 @@ result window.
 ## Observation Queries
 
 ```python
+from icarus.core.query import IcarusQuery
+
 with IcarusQuery("intel.db") as q:
+    # Replace these illustrative IDs with IDs from your database.
+    daemon_id = 1
+    file_id = 1
     # All observations for a specific daemon
     q.observations_for("daemons", daemon_id)
 
@@ -183,6 +192,8 @@ FROM match_candidates ORDER BY score DESC LIMIT 20
 
 **Cross-version additions:**
 ```python
+from icarus.core.differ import IcarusDiffer
+
 with IcarusDiffer("v1.db", "v2.db") as d:
     results = d.full_diff()
     for category, diff in results.items():

@@ -27,8 +27,8 @@ class BaseParser(ABC):
     Abstract base class for ICARUS parsers.
 
     Implement this to add support for a new data source type.
-    The pipeline calls methods in order: identify → extract_entities →
-    extract_relationships → verify.
+    Auto-detection may call identify; an explicit parser selection bypasses it.
+    The pipeline then calls extract_entities, extract_relationships, and verify.
     """
 
     @property
@@ -82,7 +82,7 @@ class BaseParser(ABC):
         Run quality gates on the populated database.
 
         Override to add parser-specific verification. Default
-        checks that core tables have rows.
+        counts files and binaries and requires at least one file row.
         """
         conn = open_db(db_path)
         try:
@@ -107,7 +107,8 @@ class BaseParser(ABC):
         Return list of external tools this parser requires.
 
         Override to declare dependencies (e.g., ['readelf'] for Linux).
-        The pipeline checks availability before starting.
+        This method describes prerequisites; callers or the parser must check
+        availability. The current pipeline does not invoke it automatically.
         """
         return []
 

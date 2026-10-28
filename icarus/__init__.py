@@ -5,7 +5,7 @@ from icarus.core.query import IcarusQuery
 from icarus.core.schema import initialize_database
 from icarus.parsers.base import BaseParser
 
-__version__ = "4.0.0b2"
+__version__ = "4.0.0b3"
 
 __all__ = [
     "__version__",

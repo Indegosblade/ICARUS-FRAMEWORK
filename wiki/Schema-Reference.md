@@ -1,6 +1,8 @@
 # Schema Reference
 
-ICARUS uses SQLite with schema version 6. 17 normalized tables, 3 FTS5 indexes, 3 intelligence views.
+ICARUS uses SQLite with schema version 6: 17 normalized tables, 3 FTS5 indexes,
+and 3 SQL views. The tables below are a reference, not a claim that every parser
+populates every entity type.
 
 ## Entity Tables
 
@@ -15,12 +17,13 @@ Entity provenance is recorded as row-level attributes:
 
 ### files
 
-Primary entity table. Every file found during extraction.
+File records extracted under the active parser's policy. Skipped or unsupported
+inputs may be absent; this is not a complete filesystem inventory guarantee.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | id | INTEGER | Primary key |
-| path | TEXT | Relative path from source root (UNIQUE) |
+| path | TEXT | Parser-recorded source path (UNIQUE); built-in filesystem helpers prefix source-relative paths with `/` |
 | filename | TEXT | Basename |
 | extension | TEXT | File extension (lowercase) |
 | size | INTEGER | Bytes |
@@ -57,7 +60,7 @@ Services, launch daemons, systemd units, IAM identities.
 | run_at_load | INTEGER | Auto-start flag |
 | keep_alive | INTEGER | Restart flag |
 | sandbox_profile | TEXT | Recorded configured profile; missing text does not prove an unsandboxed process |
-| mach_services | TEXT | Registered Mach services |
+| mach_services | TEXT | Serialized configured Mach-service declarations; not proof of registration |
 | binary_id | INTEGER | FK to binaries |
 | is_disabled | INTEGER | Disabled flag |
 | session_type | TEXT | Session type |
@@ -82,7 +85,7 @@ request.
 
 ### entitlements, sandbox_profiles, sandbox_rules, kexts, frameworks
 
-Similar structure — see `schema/icarus_schema.sql` for full DDL.
+See the [schema SQL reference](../schema/icarus_schema.sql) for full DDL.
 
 ## Infrastructure Tables
 
@@ -95,11 +98,14 @@ Key-value store for database metadata.
 | key | TEXT | Primary key |
 | value | TEXT | |
 
-Always contains: `schema_version` (currently "6"), `source` (source path).
+`schema_version` records the schema (currently `6`). Other keys depend on the
+caller and pipeline state; `source` is not guaranteed. Logical run provenance
+belongs to `versions`, whose descriptive paths may be sanitized.
 
 ### versions
 
-Pipeline run provenance. One row per `icarus build` execution.
+Pipeline run provenance. One row per logical run; a validated resume reuses its
+original run and version row.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -151,7 +157,9 @@ Temporal events against any ontology entity. Generic foreign key pattern.
 
 ### atoms
 
-Immutable observations from each source. Never modified after creation.
+Source observation bundles. Resolver operations preserve their identities and
+membership history; sanitization can redact stored values. Arbitrary SQL writes
+are outside the resolver's invariants.
 
 Binary atoms use `path:<source file path>` as their source-local key; the
 executable name remains a separate matching property. This preserves distinct
@@ -163,7 +171,8 @@ observations under the new keys.
 
 ### bags
 
-Resolved entity groups. Atoms that represent the same real-world thing.
+Groups of atoms classified as the same entity by the chosen resolver policy.
+Scores and membership record model decisions, not proof of real-world identity.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -231,7 +240,8 @@ Added in v6. Every atom pair scored during `resolve_scored`, whether or not it c
 | daemons_fts | daemons | label, program |
 | atoms_fts | atoms | properties |
 
-Auto-synced via INSERT/DELETE triggers.
+Maintained by INSERT, DELETE, and UPDATE triggers. Sanitization also rebuilds
+and verifies supported FTS indexes.
 
 ## Intelligence Views
 

@@ -2,7 +2,8 @@
 
 HYGEIA is the canonical sanitization engine. ICARUS supplies an ICARUS-safe
 pattern registry, records only non-reversible finding fingerprints, and runs an
-independent post-sanitize gate before an output may be called clean.
+separate post-sanitize content gate. Both passes share SQLite carrier inventory;
+a pass describes the configured policy, not universal absence of private data.
 """
 
 import hashlib
