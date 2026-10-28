@@ -147,6 +147,15 @@ def test_wheel_installed_parser_test_runs_outside_checkout(built_dists, tmp_path
 
     outside_checkout = tmp_path / "outside-checkout"
     outside_checkout.mkdir()
+    # The installed module and distribution metadata must identify the same release.
+    # Run isolated from the checkout so an editable install cannot mask a mismatch.
+    version = subprocess.run(
+        [str(python), "-I", "-c",
+         "from importlib.metadata import version; import icarus; "
+         "assert icarus.__version__ == version('icarus-framework') == '4.0.0b2'"],
+        cwd=outside_checkout, capture_output=True, text=True, timeout=30,
+    )
+    assert version.returncode == 0, version.stderr
     for parser in (
         "windows", "linux", "macos", "cloud/aws/cloudtrail", "generic/json",
         "generic/xml", "generic/sqlite", "generic/archive", "generic/binary",
