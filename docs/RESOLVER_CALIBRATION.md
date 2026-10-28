@@ -35,9 +35,6 @@ The **`confusable_strong` negative encodes the core tension**: a different binar
 These tables preserve results from one recorded experiment; they are not a
 universal calibration for other corpora.
 
-These tables preserve results from the recorded experiment; they are not a
-current universal calibration for other corpora.
-
 | threshold | precision | recall | F1 | notes |
 |----------:|----------:|-------:|----:|-------|
 | 0.50 | 0.84 | 0.96 | 0.89 | max-F1, but strong confusables merged (precision damage) |
