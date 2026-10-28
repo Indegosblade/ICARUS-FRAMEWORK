@@ -300,6 +300,69 @@ def test_bound_checkpoint_missing_key_fails_closed_without_key_diagnostics(tmp_p
     assert resumed.checkpoint_db.exists()
 
 
+@pytest.mark.parametrize("malformed", ["keyless_hmac", "null_identity"])
+def test_malformed_keyless_identity_never_falls_back_or_rebinds_legacy_source(
+    tmp_path, malformed,
+):
+    first, second = tmp_path / "source-A", tmp_path / "source-B"
+    first.mkdir()
+    second.mkdir()
+    output = tmp_path / "out.db"
+    original = Pipeline(first, output, parser_name="test")
+
+    def interrupt(_ctx):
+        raise RuntimeError("interrupted")
+
+    original.add_phase("ingest", interrupt)
+    with pytest.raises(RuntimeError):
+        original.run()
+    identity = (
+        {"version": 1, "algorithm": "hmac-sha256", "digest": None}
+        if malformed == "keyless_hmac" else None
+    )
+    with closing(sqlite3.connect(output)) as conn:
+        conn.execute("UPDATE versions SET metadata=?",
+                     (json.dumps({"source_identity": identity}),))
+        conn.commit()
+    with closing(sqlite3.connect(original.checkpoint_db)) as conn:
+        conn.execute("DELETE FROM checkpoint_meta WHERE key IN "
+                     "('identity_protocol','identity_state','identity_intent',"
+                     "'source_identity_key','output_uri')")
+        conn.commit()
+    legacy = tmp_path / ".out_checkpoint.db"
+    original.checkpoint_db.replace(legacy)
+    before = (hashlib.sha256(output.read_bytes()).digest(),
+              hashlib.sha256(legacy.read_bytes()).digest())
+    resumed = _finish(second if malformed == "keyless_hmac" else first, output)
+    with pytest.raises(CheckpointProvenanceError, match="source_identity"):
+        resumed.run()
+    assert hashlib.sha256(output.read_bytes()).digest() == before[0]
+    assert hashlib.sha256(legacy.read_bytes()).digest() == before[1]
+    assert not resumed.checkpoint_db.exists()
+
+
+@pytest.mark.parametrize("stage", ["version", "bound"])
+def test_boolean_public_hmac_version_is_not_an_integer_protocol_version(tmp_path, stage):
+    output = tmp_path / "out.db"
+    child = subprocess.run(
+        [sys.executable, "-c", WORKER, str(tmp_path), str(output), stage],
+        capture_output=True, text=True, timeout=20,
+    )
+    assert child.returncode == 73
+    public = _metadata(output)
+    public["source_identity"]["version"] = True
+    with closing(sqlite3.connect(output)) as conn:
+        conn.execute("UPDATE versions SET metadata=?", (json.dumps(public),))
+        conn.commit()
+    resumed = _finish(tmp_path, output)
+    before = (hashlib.sha256(output.read_bytes()).digest(),
+              hashlib.sha256(resumed.checkpoint_db.read_bytes()).digest())
+    with pytest.raises(CheckpointProvenanceError):
+        resumed.run()
+    assert hashlib.sha256(output.read_bytes()).digest() == before[0]
+    assert hashlib.sha256(resumed.checkpoint_db.read_bytes()).digest() == before[1]
+
+
 @pytest.mark.parametrize("binding_interruption", [False, True])
 def test_legacy_completed_sanitize_checkpoint_still_replays_canonical_cleanup(
     tmp_path, monkeypatch, binding_interruption,

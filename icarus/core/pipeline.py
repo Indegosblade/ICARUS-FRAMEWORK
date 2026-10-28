@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import stat
@@ -113,6 +114,17 @@ def _source_identity_hmac(source: Path, run_id: str, key: bytes) -> str:
     return hmac.new(key, value.encode("utf-8", "surrogatepass"), hashlib.sha256).hexdigest()
 
 
+def _valid_public_identity(identity: object) -> bool:
+    return (
+        isinstance(identity, dict)
+        and set(identity) == {"version", "algorithm", "digest"}
+        and type(identity["version"]) is int and identity["version"] == 1
+        and identity["algorithm"] == "hmac-sha256"
+        and isinstance(identity["digest"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", identity["digest"]) is not None
+    )
+
+
 class PipelinePhase:
     """A single processing phase."""
 
@@ -158,8 +170,9 @@ class Pipeline:
         self.skip_hygeia = skip_hygeia
         # Resume fingerprint identifying what this run is built from. When set,
         # a stored checkpoint is honored ONLY if its fingerprint matches exactly
-        # (see _validate_fingerprint); when None (direct low-level use), resume
-        # falls back to phase-name alignment alone.
+        # (see _validate_fingerprint). Direct low-level use may omit it; current
+        # private intent still binds source/parser settings, and run/output
+        # ownership plus phase alignment are validated independently.
         self.fingerprint = fingerprint
         self.phases: List[PipelinePhase] = []
         # Full filename prevents out.db/out.sqlite from sharing state. The new
@@ -577,7 +590,10 @@ class Pipeline:
                 identity = details.get("source_identity") if isinstance(details, dict) else None
             except (TypeError, ValueError, RecursionError):
                 identity = None
-            if row[1] != self.parser_name or identity != self._public_identity():
+            if (
+                row[1] != self.parser_name or not _valid_public_identity(identity)
+                or identity != self._public_identity()
+            ):
                 raise CheckpointProvenanceError("Prepared run does not match its output identity")
             self.context.version_id = row[0]
         elif empty:
@@ -686,17 +702,24 @@ class Pipeline:
         identity = (
             version_details.get("source_identity") if isinstance(version_details, dict) else None
         )
+        has_public_identity = (
+            isinstance(version_details, dict) and "source_identity" in version_details
+        )
         legacy_identity = (
             version_details.get("source_identity_sha256")
             if isinstance(version_details, dict) else None
         )
         if protocol is not None and state not in ("bound", "upgrading"):
             mismatches.append("private_identity_state")
-        if identity is not None:
-            expected_identity = {"version": 1, "algorithm": "hmac-sha256", "digest":
-                                 _source_identity_hmac(self.source, metadata["run_id"], key)
-                                 if key is not None else None}
-            if identity != expected_identity:
+        if has_public_identity:
+            if (
+                key is None or not isinstance(identity, dict)
+                or not _valid_public_identity(identity)
+            ):
+                mismatches.append("source_identity")
+            elif not hmac.compare_digest(
+                identity["digest"], _source_identity_hmac(self.source, metadata["run_id"], key)
+            ):
                 mismatches.append("source_identity")
         elif protocol is not None and state == "bound":
             mismatches.append("source_identity")
