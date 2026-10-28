@@ -21,7 +21,7 @@ try:
     try:
         from hygeia.verifier import is_false_positive as _hygeia_is_false_positive
     except ImportError:
-        # Compatibility with the currently pinned HYGEIA 3.14 API. Newer
+        # Compatibility with older HYGEIA 3.14 installations. Newer
         # HYGEIA releases expose this policy helper as a supported public API.
         from hygeia.verifier import _is_false_positive as _hygeia_is_false_positive
 

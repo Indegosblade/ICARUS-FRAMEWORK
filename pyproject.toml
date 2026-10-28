@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["intelligence", "analysis", "sqlite", "diffing", "security", "ontology", "entities"]
 dependencies = [
-    "hygeia @ git+https://github.com/Indegosblade/HYGEIA.git@518e55b48036844808f911613727cd7a7c1d4e0d",
+    "hygeia @ git+https://github.com/Indegosblade/HYGEIA.git@293211ad25eea859f89a4276937f1a1ad82d1a94",
     "pyyaml>=6.0",
     "jsonschema>=4.20",
 ]
@@ -43,6 +43,7 @@ icarus = "icarus.__main__:main"
 dev = [
     "pytest==9.2.0",
     "pytest-cov==7.1.0",
+    "coverage==7.10.6",
     "ruff==0.17.3",
     "mypy==2.4.0",
     "bandit==1.9.4",

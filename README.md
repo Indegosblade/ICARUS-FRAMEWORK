@@ -61,7 +61,7 @@ icarus diff v1.db v2.db -o report.md
 |-----------|---------|---------|
 | Python | >= 3.10 | Runtime. Tested on 3.10, 3.12, 3.13. |
 | SQLite | >= 3.35 | FTS5 full-text search support. Ships with Python on all platforms. |
-| [HYGEIA](https://github.com/Indegosblade/HYGEIA) | v3.14.0 | PII detection and sanitization. Auto-installed as a dependency. |
+| [HYGEIA](https://github.com/Indegosblade/HYGEIA) | v3.15.0 | PII detection and sanitization. Auto-installed from a pinned commit. |
 | [PyYAML](https://pyyaml.org/) | >= 6.0 | Parser manifest loading. |
 | [jsonschema](https://python-jsonschema.readthedocs.io/) | >= 4.20 | Parser manifest validation against JSON Schema. |
 
