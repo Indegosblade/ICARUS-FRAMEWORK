@@ -201,7 +201,8 @@ def test_macos_end_to_end_with_binary(tmp_path):
         assert surface.count == 1
         assert surface.rows[0][0] == "com.test.testd"
 
-        # unsandboxed daemon exposing Mach services with entitlements
+        # Recorded Mach service / entitlement declarations; no runtime sandbox
+        # state, privilege, or effective client reachability is established.
         assert q.escape_surface().count == 1
 
 

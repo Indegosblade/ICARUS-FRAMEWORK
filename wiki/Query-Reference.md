@@ -8,10 +8,10 @@ Pre-built queries via `IcarusQuery`:
 from icarus.core.query import IcarusQuery
 
 with IcarusQuery("intel.db") as q:
-    # Services running as root with no sandbox profile
+    # Explicit root-user declarations with no recorded sandbox profile
     q.root_daemons()
 
-    # Service -> binary -> permission map
+    # Configured Mach-service declarations
     q.service_map()
 
     # Normalized Mach service -> owning daemon (the reachability pivot)
@@ -19,21 +19,48 @@ with IcarusQuery("intel.db") as q:
     # ...or filter service names with a SQL LIKE pattern
     q.mach_service_owners("com.apple.%")
 
-    # Kernel-reachable entry points from userland
+    # Kernel user-client metadata candidates (not proven client reachability)
     q.kernel_surface()
 
     # Test/debug binaries left in production
     q.test_binaries()
 
-    # High-privilege entities reachable from low-privilege
+    # Mach-service / entitlement declaration candidates (not escalation proof)
     q.escape_surface()
 
-    # Permission/entitlement distribution across binaries
+    # Inventory of every extracted entitlement key (no privilege classification)
     q.privileged_entitlements()
 
-    # Daemons whose executable binary holds a matching entitlement key (LIKE)
+    # Services whose linked image declares a matching entitlement key (LIKE)
     q.daemons_with_entitlement("com.apple.private.%")
 ```
+
+## Configuration evidence and compatibility
+
+These helpers inspect configuration files and extracted binary metadata. They do
+not establish that a job ran, its effective credentials or sandbox, an allowed
+client connection, or an exploitable privilege boundary.
+
+`root_daemons()` includes an explicit `user_name='root'`, or numeric `'0'` when
+the row's version provenance identifies the Linux parser. Missing users remain
+unknown, including launch agents without `UserName`. A missing or empty
+`sandbox_profile` means **no recorded profile**, not an unsandboxed process.
+Linux `User=` and `Group=` declarations are preserved from the `[Service]`
+section; see [service-identity parsing](../docs/SERVICE_IDENTITY.md) for limits.
+Existing Linux databases need a fresh rebuild to collect this newly preserved
+metadata; querying an old NULL does not reconstruct a source declaration.
+
+`privileged_entitlements()` is a legacy method name: without keys it inventories
+all entitlement keys, and with keys it matches the caller's selection. It does not
+classify them as privileged. `kernel_surface()` reports metadata-selected
+user-client candidates, without proving runtime access.
+
+`escape_surface()` retains its join but labels results as declaration candidates.
+Its returned key-list column is now `entitlement_keys`. The schema-v6 SQL view
+`v_sandbox_escape_surface` and its historical `privileged_entitlements` column
+remain unchanged for raw-SQL compatibility; that legacy column contains every
+joined entitlement key, not a verified privilege classification. Python consumers
+using that helper's old dictionary key should switch to `entitlement_keys`.
 
 ## Full-Text Search
 
@@ -126,7 +153,7 @@ SELECT arch, COUNT(*) as cnt FROM binaries GROUP BY arch ORDER BY cnt DESC
 SELECT file_type, COUNT(*) as cnt FROM files GROUP BY file_type ORDER BY cnt DESC
 ```
 
-**Daemons without sandbox:**
+**Explicit root-user declarations with no recorded sandbox profile:**
 ```sql
 SELECT label, program, user_name FROM daemons WHERE sandbox_profile IS NULL AND user_name = 'root'
 ```

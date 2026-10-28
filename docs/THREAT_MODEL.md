@@ -68,6 +68,10 @@ actor require an authenticated delivery channel or external signature.
 
 ## Operational assumptions and residual limits
 
+- Service and entitlement helpers report collected configuration and metadata,
+  not effective credentials, sandbox state, client access, or exploitability.
+  Missing service identity is unknown; the root helper requires an explicit
+  declaration. See [SERVICE_IDENTITY.md](SERVICE_IDENTITY.md).
 - Source contents must remain immutable during a resumable build. Path/config
   fingerprints do not prove source-content identity.
 - A successful pattern-based sanitization gate means no residual matched the active

@@ -2,7 +2,7 @@
 ICARUS Query Engine — SQL interface with full-text search and intelligence views.
 
 Provides both raw SQL access and pre-built intelligence queries
-for common patterns (privilege escalation surface, anomalies, etc.).
+for declared configuration patterns and inspection candidates.
 """
 
 import sqlite3
@@ -142,29 +142,41 @@ class IcarusQuery:
         return self.execute(sql, (query,))
 
     def root_daemons(self) -> QueryResult:
-        """Daemons running as root with no sandbox."""
+        """Explicit root-user declarations with no recorded sandbox profile.
+
+        Missing identity stays unknown. Numeric UID 0 counts only when the
+        row's provenance identifies the Linux parser; a numeric launchd
+        UserName or cloud-account field must not inherit UID semantics.
+        Configuration does not prove execution or effective sandbox state.
+        """
         result = self.execute("""
             SELECT label, program, mach_services
             FROM daemons
-            WHERE (user_name = 'root' OR user_name IS NULL)
+            WHERE (user_name = 'root' OR (
+                user_name = '0' AND EXISTS (
+                    SELECT 1 FROM versions v
+                    WHERE v.id = daemons.source_version_id AND v.parser_name = 'linux'
+                )
+            ))
               AND (sandbox_profile IS NULL OR sandbox_profile = '')
             ORDER BY label
         """)
-        result.query_name = "Root Daemons (No Sandbox)"
+        result.query_name = "Explicit Root User Declarations (No Recorded Sandbox Profile)"
         return result
 
     def privileged_entitlements(self, keys: Optional[List[str]] = None) -> QueryResult:
-        """Binaries holding specified privileged entitlements.
+        """Inventory entitlement keys or match caller-specified keys.
 
         Pass platform-specific keys via the keys parameter. No defaults —
-        what counts as 'privileged' depends on the data source.
+        what counts as 'privileged' depends on the data source. This legacy
+        method name does not classify every stored key as privileged.
         """
         if not keys:
             result = self.execute("""
                 SELECT e.key, COUNT(*) AS holders
                 FROM entitlements e GROUP BY e.key ORDER BY holders DESC LIMIT 50
             """)
-            result.query_name = "Privileged Entitlements"
+            result.query_name = "Entitlement Key Inventory"
             return result
         placeholders = ",".join(["?"] * len(keys))
         result = self.execute(
@@ -176,7 +188,7 @@ class IcarusQuery:
             f"ORDER BY e.key, b.bundle_id",
             tuple(keys),
         )
-        result.query_name = "Privileged Entitlements"
+        result.query_name = "Entitlements Matching Requested Keys"
         return result
 
     def service_map(self) -> QueryResult:
@@ -211,11 +223,11 @@ class IcarusQuery:
         return result
 
     def daemons_with_entitlement(self, key_pattern: str) -> QueryResult:
-        """Daemons whose executable binary holds a matching entitlement key.
+        """Service/image declarations linked to a matching extracted entitlement key.
 
-        Joins daemons -> binaries -> entitlements (key LIKE). The core
-        attack-surface question: which reachable daemons hold a powerful
-        entitlement (e.g. an IOKit user-client class or a private TCC allow).
+        Joins daemons -> binaries -> entitlements (key LIKE). This is source
+        configuration and image metadata, not proof of runtime reachability,
+        effective authorization, or an exploitable privilege boundary.
         """
         result = self.execute("""
             SELECT d.label, e.key, e.value, d.sandbox_profile, d.user_name
@@ -229,9 +241,9 @@ class IcarusQuery:
         return result
 
     def kernel_surface(self) -> QueryResult:
-        """Kernel extensions with user-reachable interfaces."""
+        """Kext metadata declaring user-client candidates, not proven reachability."""
         result = self.execute("SELECT * FROM v_kernel_attack_surface")
-        result.query_name = "Kernel Attack Surface"
+        result.query_name = "Kernel User-Client Declaration Candidates"
         return result
 
     def test_binaries(self) -> QueryResult:
@@ -241,9 +253,18 @@ class IcarusQuery:
         return result
 
     def escape_surface(self) -> QueryResult:
-        """Privileged daemons reachable via mach-lookup."""
-        result = self.execute("SELECT * FROM v_sandbox_escape_surface")
-        result.query_name = "Sandbox Escape Surface"
+        """Mach-service/entitlement declarations with no recorded sandbox profile.
+
+        The historical raw view retains its schema and column names. This
+        helper aliases its unclassified key inventory to entitlement_keys;
+        it does not prove privilege, client access, execution, or an escape.
+        """
+        result = self.execute("""
+            SELECT label, program, mach_services, sandbox_profile, user_name,
+                   privileged_entitlements AS entitlement_keys
+            FROM v_sandbox_escape_surface
+        """)
+        result.query_name = "Mach Service / Entitlement Declaration Candidates"
         return result
 
     def observations_for(

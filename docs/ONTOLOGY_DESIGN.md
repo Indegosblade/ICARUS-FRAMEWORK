@@ -17,9 +17,11 @@ paths in `plist_path`. Windows DLLs, Linux shared objects, and Apple framework
 bundles share `frameworks`. These mappings are visible in
 `icarus/parsers/cloud/aws/cloudtrail.py`, `linux.py`, `windows.py`, and `macos.py`.
 
-The query layer then supplies source-specific interpretations. For example,
-`IcarusQuery.root_daemons()` treats a missing user as root and a missing sandbox
-profile as no sandbox. The explorer currently follows schema foreign keys and
+The query layer also needs explicit evidence limits. Before issue #110,
+`IcarusQuery.root_daemons()` treated a missing user as root and a missing sandbox
+profile as no sandbox. That bounded correction now requires explicit root-user
+evidence and labels the profile as unrecorded; it does not implement the v7 model
+proposed here. The explorer currently follows schema foreign keys and
 shows physical table names. A foreign key establishes a stored reference; it
 does not establish the meaning or evidential strength of that reference.
 
