@@ -62,6 +62,33 @@ ATOM_PROJECTIONS: Dict[str, ProjectionSpec] = {
 }
 
 
+def _insert_atom(conn: sqlite3.Connection, values: tuple, *, revoke_trust: bool) -> int:
+    """Make the first inserted atom inseparable from revocation of old evidence."""
+    if revoke_trust:
+        # A savepoint alone would commit when released if it were outermost.
+        # Keep one enclosing transaction so atomize_db still commits only once.
+        if not conn.in_transaction:
+            conn.execute("BEGIN")
+        conn.execute("SAVEPOINT icarus_atomize_first_write")
+    try:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO atoms (source_version_id, entity_type, "
+            "source_key, properties, created_at) VALUES (?, ?, ?, ?, ?)", values,
+        )
+        if cursor.rowcount == 1 and revoke_trust:
+            from icarus.integrations.hygeia import invalidate_sanitization
+            invalidate_sanitization(conn)
+    except BaseException:
+        if revoke_trust:
+            conn.execute("ROLLBACK TO SAVEPOINT icarus_atomize_first_write")
+            conn.execute("RELEASE SAVEPOINT icarus_atomize_first_write")
+        raise
+    else:
+        if revoke_trust:
+            conn.execute("RELEASE SAVEPOINT icarus_atomize_first_write")
+    return cursor.rowcount
+
+
 def atomize_db(
     src_conn: sqlite3.Connection,
     out_conn: sqlite3.Connection,
@@ -80,8 +107,13 @@ def atomize_db(
     Inserts use ``INSERT OR IGNORE`` so re-runs are idempotent; only rows that
     actually inserted (``rowcount == 1``) are counted. ``src_conn`` and
     ``out_conn`` may be the same connection object (within-build atomization).
-    Commits ``out_conn`` once at the end and returns
-    ``{entity_type: inserted_count}``.
+    Commits ``out_conn`` once on success (including any caller-pending writes)
+    and returns ``{entity_type: inserted_count}``. On failure, earlier successful
+    inserts may remain pending: the caller owns the choice to commit or roll
+    back that transaction. Old content-trust evidence is revoked alongside the
+    first inserted atom, so a committed partial result cannot inherit it. If
+    revocation itself fails, that first insert is rolled back to a savepoint
+    without discarding unrelated caller writes. A no-op retains existing trust.
     """
     if entity_types is None:
         entity_types = list(ATOM_PROJECTIONS)
@@ -104,6 +136,7 @@ def atomize_db(
 
     now = datetime.now(timezone.utc).isoformat()
     counts: Dict[str, int] = {}
+    trust_revoked = False
 
     for entity_type in entity_types:
         spec = ATOM_PROJECTIONS[entity_type]
@@ -124,9 +157,8 @@ def atomize_db(
                     for i, name in enumerate(spec.field_names)
                     if row[i] is not None
                 }
-                cursor = out_conn.execute(
-                    "INSERT OR IGNORE INTO atoms (source_version_id, entity_type, "
-                    "source_key, properties, created_at) VALUES (?, ?, ?, ?, ?)",
+                inserted_rows = _insert_atom(
+                    out_conn,
                     (
                         version_id,
                         entity_type,
@@ -134,15 +166,14 @@ def atomize_db(
                         json.dumps(props, sort_keys=True),
                         now,
                     ),
+                    revoke_trust=not trust_revoked,
                 )
-                if cursor.rowcount == 1:
+                if inserted_rows == 1:
                     inserted += 1
+                    trust_revoked = True
         finally:
             rows.close()
         counts[entity_type] = inserted
 
-    if any(counts.values()):
-        from icarus.integrations.hygeia import invalidate_sanitization
-        invalidate_sanitization(out_conn)
     out_conn.commit()
     return counts
