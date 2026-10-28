@@ -5,7 +5,8 @@
 - **A1 — The source tree under analysis.** Often *untrusted* (firmware image, container
   export, someone else's rootfs) and possibly *adversarial*.
 - **A2 — The intelligence database.** The product's output; used for security decisions.
-- **A3 — The "sanitized" database.** The artifact intended to be *safe to share*.
+- **A3 — The database that passed configured sanitization checks.** Sharing still
+  requires review for the source, recipient, and policy.
 - **A4 — STIX exports.** Meant to interoperate with external threat-intel tooling.
 - **A5 — Secrets present in the source or the host** (passwords, WireGuard keys, tokens).
 
@@ -23,11 +24,12 @@
 
 1. **A1 → parser** (ingest). The primary boundary; input is attacker-controlled.
 2. **A2 → query/diff/STIX** (consumers of a possibly-hostile DB file).
-3. **A3 → external world** (sharing). Requires A3 to actually be clean.
+3. **A3 → external world** (sharing). Requires configured verification and a
+   separate sharing review.
 4. **Installed distribution → runtime** (package integrity).
 5. **`icarus.parsers` entry-point plugins** — any installed distribution advertising the
-   group has its code imported at `import icarus.parsers` time (trusted-by-Python, but
-   undocumented).
+   group has its code imported at `import icarus.parsers` time (trusted-by-Python;
+   see [parser development](../about/PARSERS.md)).
 6. **Dependencies / CI actions** (supply chain).
 
 ## Sanitization-marker limits
@@ -49,7 +51,7 @@ actor require an authenticated delivery channel or external signature.
 | # | Abuse case | Mitigation | Residual (issue) |
 |---|---|---|---|
 | AC1 | In-root symlink points outside the tree; parser reads host files into A2/A3 | symlinks cataloged, never dereferenced or traversed | **Fixed/merged (#43 → #62)** |
-| AC2 | Secret in A1 ends up in A3 and is shared as "clean" | HYGEIA canonical + fail-closed + mandatory post-sanitize gate | **Fixed/merged (#41/#42 → #59)** |
+| AC2 | Secret in A1 ends up in A3 and is shared as "clean" | HYGEIA canonical + fail-closed + configured post-sanitize gate | Residual risk depends on configured patterns and supported carriers; no universal secret detection claim |
 | AC3 | Malformed/huge/nested input exhausts memory or hangs the run | Format-specific read, nesting, archive and detection budgets | Parser extraction still enumerates each directory; resolver candidate sets scale with corpus size |
 | AC4 | Hostile file **name/path** injects into the diff Markdown report | Shared Markdown escaping and bounded display | Regression coverage in `test_query_markdown.py`; a report is evidence, not executable input |
 | AC5 | Recipient trusts an invalid STIX bundle / dangling refs | deterministic RFC-4122 `uuid5` ids, valid refs/timestamps | **Fixed/merged (#21 → #61)** |
@@ -79,6 +81,8 @@ actor require an authenticated delivery channel or external signature.
   declaration. See [SERVICE_IDENTITY.md](SERVICE_IDENTITY.md).
 - Source contents must remain immutable during a resumable build. Path/config
   fingerprints do not prove source-content identity.
+- The source-identity recovery key is private checkpoint state and needs separate
+  access protection; see [source identity and privacy](SOURCE_IDENTITY_PRIVACY.md).
 - A successful pattern-based sanitization gate means no residual matched the active
   policy. It does not establish that every possible secret or personal identifier
   was recognized. Review sharing policy for the actual source and recipient.

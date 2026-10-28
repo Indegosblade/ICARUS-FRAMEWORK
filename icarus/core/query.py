@@ -395,7 +395,7 @@ class IcarusQuery:
     def observations_for(
         self, entity_table: str, entity_id: int
     ) -> QueryResult:
-        """All observations for a specific entity."""
+        """Observations for an entity, subject to the query result-row limit."""
         result = self.execute(
             "SELECT * FROM observations WHERE entity_table = ? AND entity_id = ? "
             "ORDER BY observed_at",

@@ -349,16 +349,16 @@ def main():
     build_p.add_argument("--output", "-o", required=True, help="Output database path")
     build_p.add_argument(
         "--parser", "-p", default=None,
-        help="Parser to use: windows, linux (default: auto-detect)")
+        help="Installed parser ID; see 'icarus parser list' (default: auto-detect)")
     build_p.add_argument(
-        "--fresh", action="store_true", help="Ignore checkpoints, start from scratch")
+        "--fresh", action="store_true",
+        help="Build a new temporary database and replace the destination on success")
     build_p.add_argument(
         "--skip-hygeia", action="store_true",
         help="Skip HYGEIA sanitization (output will contain raw unsanitized data)")
     build_p.add_argument(
         "--resolve", action="store_true",
-        help="EXPERIMENTAL: run entity resolution (resolve_scored) as a build phase, "
-             "after verify and before sanitize")
+        help="EXPERIMENTAL: score and group entities within this build before sanitization")
 
     # gui (optional local read-only ontology explorer)
     gui_p = sub.add_parser("gui", help="Open the local read-only ontology explorer")
@@ -373,7 +373,7 @@ def main():
     query_p = sub.add_parser("query", help="Query an intelligence database")
     query_p.add_argument("database", help="Path to ICARUS database")
     query_mode = query_p.add_mutually_exclusive_group(required=True)
-    query_mode.add_argument("--sql", help="Raw SQL query")
+    query_mode.add_argument("--sql", help="Read-only SQL statement (results are capped)")
     query_mode.add_argument("--search", help="Full-text search query")
     query_mode.add_argument("--stats", action="store_true", help="Show table row counts")
     query_p.add_argument("--table", help="Table for --search FTS (default: files)")

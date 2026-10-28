@@ -5,13 +5,19 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Release history: earlier GitHub release pages cover only part of the tagged
-history. Existing tags remain intact. The `4.0.0b2` prerelease provides an aligned
-tag, package version, and downloadable wheel and source distribution. Historical
+history. Existing tags remain intact. Historical
 release notes describe their original behavior, not the current operating contract.
 
 ## [Unreleased]
 
-Changes after `4.0.0b2` will be recorded here.
+Changes after `4.0.0b3` will be recorded here.
+
+## [4.0.0b3] - 2026-10-28
+
+Beta documentation and help corrections. Quick starts now pin the published beta;
+parser, query, schema, threat-model, resolver-calibration, and STIX guidance now
+describe verified behavior and limits. Public Markdown documentation is included
+in source archives.
 
 ## [4.0.0b2] - 2026-10-28
 
@@ -90,5 +96,6 @@ proposal, while the shipped database schema remains v6.
 - First stable release: pipeline with checkpoint/resume, schema v4 + FTS5, query engine,
   cross-version differ, 8 production parsers, HYGEIA sanitization, STIX 2.1 export.
 
-[Unreleased]: https://github.com/Indegosblade/ICARUS-FRAMEWORK/compare/v4.0.0b2...HEAD
+[Unreleased]: https://github.com/Indegosblade/ICARUS-FRAMEWORK/compare/v4.0.0b3...HEAD
+[4.0.0b3]: https://github.com/Indegosblade/ICARUS-FRAMEWORK/releases/tag/v4.0.0b3
 [4.0.0b2]: https://github.com/Indegosblade/ICARUS-FRAMEWORK/releases/tag/v4.0.0b2

@@ -152,7 +152,7 @@ def test_wheel_installed_parser_test_runs_outside_checkout(built_dists, tmp_path
     version = subprocess.run(
         [str(python), "-I", "-c",
          "from importlib.metadata import version; import icarus; "
-         "assert icarus.__version__ == version('icarus-framework') == '4.0.0b2'"],
+         "assert icarus.__version__ == version('icarus-framework') == '4.0.0b3'"],
         cwd=outside_checkout, capture_output=True, text=True, timeout=30,
     )
     assert version.returncode == 0, version.stderr

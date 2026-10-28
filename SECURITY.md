@@ -4,18 +4,22 @@
 
 ICARUS is Beta, source-available software (PolyForm Noncommercial 1.0.0). It is a
 security-research tool that parses untrusted input (filesystem trees, archives, SQLite
-databases, audit logs). Treat any database it produces as sensitive until it has passed
-the HYGEIA sanitization phase.
+databases, audit logs). Treat output as sensitive. A current final sanitization
+audit records configured checks; it does not prove every private value was found.
+Review the [threat model](docs/THREAT_MODEL.md) and recipient policy before sharing.
 
 ## Supported versions
 
-Only the latest released version receives security fixes. Pre-1.0 / beta releases do
-not carry a backport guarantee.
+Security fixes target the current development line and published 4.0 beta.
+The current published prerelease is
+[4.0.0b3](https://github.com/Indegosblade/ICARUS-FRAMEWORK/releases/tag/v4.0.0b3).
+Use that explicit link; GitHub's stable `/latest` endpoint can identify an older
+historical release. Older versions have no backport guarantee.
 
 | Version | Supported |
 |---------|-----------|
-| latest  | ✅        |
-| older   | ❌        |
+| Current 4.0 beta / development line | Fixes on the current line |
+| Historical releases | No backport guarantee |
 
 ## Reporting a vulnerability
 

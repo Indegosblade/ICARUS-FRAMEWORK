@@ -28,7 +28,7 @@ execute trusted Python code in the caller's process; review them before installi
 
 **Specificity** determines priority in auto-detection. Lower wins.
 
-**Reliability** uses Admiralty/NATO grades: A (completely reliable) through F (reliability cannot be judged).
+**Reliability** uses Admiralty/NATO source-grade labels: A (completely reliable) through F (reliability cannot be judged). These labels describe source reliability, not parser correctness.
 
 ---
 
@@ -42,7 +42,7 @@ Under evaluation in `parsers-devel.json` — not yet gated for production.
 
 **`macos`** — macOS / iOS root filesystem: daemons, Mach services, entitlements, kexts, frameworks. Ingests an extracted rootfs for iOS/macOS daemon and attack-surface mapping (Apple Security Bounty research), in phases:
 
-1. **launchd** — LaunchDaemon/LaunchAgent plists become `daemons`; each `MachServices` key is normalized into a `mach_services` row (the service -> daemon reachability pivot).
+1. **launchd** — LaunchDaemon/LaunchAgent plists become `daemons`; each `MachServices` key is normalized into a `mach_services` declaration linked to its declaring daemon. This does not establish runtime client reachability.
 2. **Mach-O binaries** — architecture, code-signing flags, and embedded entitlements, extracted by a self-contained stdlib Mach-O reader at `icarus/parsers/macho.py` (no external `codesign` or `ldid`).
 3. **IOKit kexts**, **frameworks**, and the **sandbox-profile catalog**.
 
@@ -53,6 +53,8 @@ Under evaluation in `parsers-devel.json` — not yet gated for production.
 ## Parser Manifest
 
 Every parser ships with a YAML manifest validated by JSON Schema at load time. The manifest declares identity, capabilities, quality, and test configuration.
+The parser class's `name` must equal `parser_id`; the registry rejects a mismatch.
+Passing the fixture harness does not automatically promote `quality_tier`.
 
 ```yaml
 parser_id: "my_parser"
@@ -60,7 +62,7 @@ version: "1.0.0"
 spec_version: "icarus-parser/1.0"
 author: "Your Name"
 license: "PolyForm-Noncommercial-1.0.0"
-quality_tier: "production"        # production | candidate | prototype | private
+quality_tier: "prototype"         # production | candidate | prototype | private
 description: "One-line description"
 
 identify:
@@ -74,7 +76,6 @@ consumes:
 produces:
   entity_types:
     - files
-    - binaries
 
 reliability: "B"                  # A-F Admiralty grade
 default_confidence: 0.85          # 0.0-1.0
@@ -97,6 +98,9 @@ icarus parser validate path/to/my_parser.yaml
 ## Writing a Parser
 
 ### Interface
+
+This is a template showing the required method signatures; the extraction example
+below is a complete minimal parser implementation.
 
 ```python
 from icarus.parsers.base import BaseParser
@@ -131,43 +135,83 @@ class MyParser(BaseParser):
 
 ```python
 import os
-import sqlite3
+from pathlib import Path
 
-def extract_entities(self, source: Path, db_path: Path) -> dict:
-    conn = sqlite3.connect(str(db_path))
-    count = 0
-    try:
-        for dirpath, _dirs, files in os.walk(source, onerror=lambda e: None):
-            for fname in files:
-                path = Path(dirpath) / fname
-                try:
-                    # Normalize and insert
-                    rel = self._rel_path(path, source)
-                    st = path.stat()
-                    conn.execute(
-                        "INSERT OR IGNORE INTO files "
-                        "(path, filename, extension, size, sha256, file_type) "
-                        "VALUES (?,?,?,?,?,?)",
-                        (rel, path.name, path.suffix, st.st_size,
-                         self._safe_hash(path, st.st_size), "my_type"),
-                    )
-                    count += 1
-                except (PermissionError, OSError):
-                    continue
-                if count % 50000 == 0:
-                    conn.commit()
-        conn.commit()
-    finally:
-        conn.close()
-    return {"files": count}
+from icarus.core.schema import open_db
+from icarus.parsers.base import BaseParser
+
+
+def fail_walk(error: OSError) -> None:
+    raise error
+
+
+class MyParser(BaseParser):
+    @property
+    def name(self) -> str:
+        return "my_parser"  # Must match manifest parser_id.
+
+    @property
+    def description(self) -> str:
+        return "Example MY_FORMAT parser"
+
+    def identify(self, source: Path) -> bool:
+        marker = Path(source) / "MY_FORMAT.marker"
+        _st, kind = self._file_kind(marker)
+        return kind == "regular" and not self._path_has_symlink(marker, source)
+
+    def extract_entities(self, source: Path, db_path: Path) -> dict:
+        source = Path(source).resolve()
+        inserted = 0
+        conn = open_db(db_path)
+        try:
+            with conn:  # one atomic transaction; no periodic partial commits
+                for directory, dirs, files in os.walk(
+                    source, followlinks=False, onerror=fail_walk
+                ):
+                    parent = Path(directory)
+                    dirs[:] = [name for name in dirs
+                               if not self._path_has_symlink(parent / name, source)]
+                    for filename in files:
+                        path = parent / filename
+                        _st, kind = self._file_kind(path)
+                        if kind != "regular" or self._path_has_symlink(path, source):
+                            continue
+                        st = path.lstat()
+                        digest = self._safe_hash(path, st.st_size)
+                        try:
+                            with self._open_regular(path) as handle:
+                                text = handle.read(4096).decode("utf-8", "replace")
+                        except OSError:
+                            continue
+                        if "MY_FORMAT" not in text:
+                            continue
+                        cur = conn.execute(
+                            "INSERT OR IGNORE INTO files "
+                            "(path, filename, extension, size, sha256, file_type) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (self._rel_path(path, source), path.name,
+                             path.suffix.lower(), st.st_size, digest, "my_format"),
+                        )
+                        inserted += cur.rowcount
+        finally:
+            conn.close()
+        return {"files": inserted}
+
+    def extract_relationships(self, source: Path, db_path: Path) -> dict:
+        return {}
 ```
 
-Rules:
-- **Use `os.walk` with `onerror`, not `rglob`.** Broken symlinks crash `rglob`.
-- **Wrap connections in `try/finally`.** Always close on crash.
-- **Stream, never batch-load.** Iterate and commit periodically.
-- **Check for duplicates** before INSERT on tables without UNIQUE constraints (binaries, observations).
-- **Return stats** for pipeline provenance.
+This example emits only file rows and inherits `BaseParser.verify`. The helper
+checks regular files, refuses symlink/reparse components, and safely opens files;
+the SQL uses parameters and counts actual inserted rows. Traversal errors should
+be handled according to parser policy and reported rather than silently ignored.
+Repeating this extraction inserts zero additional rows for already-seen paths.
+Keep source data immutable, output outside the source tree, and logs private.
+Direct parser calls do not acquire pipeline leases or create pipeline audit evidence.
+
+This is not resumable per batch. Phase replay, cursor, and provenance transaction
+behavior is defined by the pipeline and built-in parsers; see
+[ingest recovery](../docs/INGEST_RECOVERY.md) and `icarus/parsers/progress.py`.
 
 ### Idempotency
 
@@ -242,7 +286,7 @@ icarus parser test my_parser
 
 Map your source's concepts to ICARUS tables:
 
-| ICARUS Table | Windows | Linux | CloudTrail | Your Parser |
+| Potential ICARUS mapping | Windows concept | Linux concept | CloudTrail concept | Your Parser |
 |-------------|---------|-------|------------|-------------|
 | `files` | Filesystem | Filesystem | -- | ? |
 | `binaries` | PE/DLL | ELF/.so | -- | ? |
@@ -253,7 +297,9 @@ Map your source's concepts to ICARUS tables:
 | `frameworks` | DLLs | .so libraries | -- | ? |
 | `observations` | -- | -- | API events | ? |
 
-Not every table needs data. A CloudTrail parser only writes to `daemons` and `observations`. A network scanner might only use `daemons` (listening services) and `entitlements` (port/protocol). Use what applies.
+This is a design table, not a declaration of implemented parser capabilities.
+Check each manifest's `produces.entity_types`: CloudTrail declares `files`,
+`daemons`, and `observations`.
 
 ---
 

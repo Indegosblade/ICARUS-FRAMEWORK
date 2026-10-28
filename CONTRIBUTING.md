@@ -7,11 +7,16 @@ ICARUS is beta, source-available software under
 
 Clone the repository and create a virtual environment. See
 [Getting started](wiki/Getting-Started.md) for activation commands on Windows,
-Linux, and macOS.
+Linux, and macOS. The clone follows the development branch; the user quick start
+instead pins the published beta release.
 
 ```bash
 git clone https://github.com/Indegosblade/ICARUS-FRAMEWORK.git
 cd ICARUS-FRAMEWORK
+python -m venv .venv
+# Activate .venv for your shell before continuing.
+# Windows PowerShell: .\.venv\Scripts\Activate.ps1
+# Linux/macOS: source .venv/bin/activate
 python -m pip install -e ".[dev]"
 ```
 

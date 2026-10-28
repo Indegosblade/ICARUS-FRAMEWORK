@@ -11,7 +11,7 @@ Windows PowerShell:
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install git+https://github.com/Indegosblade/ICARUS-FRAMEWORK.git
+python -m pip install git+https://github.com/Indegosblade/ICARUS-FRAMEWORK.git@v4.0.0b3
 ```
 
 Linux or macOS:
@@ -19,7 +19,7 @@ Linux or macOS:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install git+https://github.com/Indegosblade/ICARUS-FRAMEWORK.git
+python -m pip install git+https://github.com/Indegosblade/ICARUS-FRAMEWORK.git@v4.0.0b3
 ```
 
 The package installs PyYAML, jsonschema, and a commit-pinned HYGEIA dependency.
@@ -32,9 +32,13 @@ icarus --help
 icarus parser list
 ```
 
-Installation from the repository follows its default branch. For a reproducible
-deployment, install a reviewed commit by appending `@COMMIT_SHA` to the Git URL
-and record the resulting environment.
+These commands select the published `4.0.0b3` beta tag. The release page also
+provides a wheel, source archive, and SHA256 checksums. Use the explicit
+[versioned release link](https://github.com/Indegosblade/ICARUS-FRAMEWORK/releases/tag/v4.0.0b3):
+GitHub's stable `/latest` link excludes prereleases and may identify a historical
+version. For a deployment record, retain the resolved commit and installed
+dependency versions. Omit the Git URL's tag only when intentionally installing
+the changing development branch.
 
 ## Build a snapshot
 
