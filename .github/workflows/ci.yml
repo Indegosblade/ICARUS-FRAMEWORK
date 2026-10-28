@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   test:
+    needs: [lint, security, dependency-audit]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -59,6 +60,7 @@ jobs:
       - run: bandit -r icarus/ -c pyproject.toml
 
   package:
+    needs: [lint, security, dependency-audit]
     # Builds the distribution and exercises the INSTALLED wheel (not an editable
     # install), so a packaging regression that drops runtime data files — parser
     # manifests, the manifest JSON Schema, catalogs — is caught in CI.
