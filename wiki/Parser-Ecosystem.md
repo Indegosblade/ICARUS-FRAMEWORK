@@ -2,31 +2,16 @@
 
 The parser ecosystem manages, validates, and tests parsers at scale.
 
-## Why the parser is the extension point
+## Parser contract
 
-A parser is the **only** source-specific code in ICARUS. Everything downstream of it —
-the normalized schema, FTS5 search, the cross-version differ, entity resolution, STIX
-2.1 export, and the fail-closed HYGEIA sanitizer — is schema-driven and source-agnostic.
-Write a parser that emits rows into the entity tables and you inherit all of it for
-free. That is the leverage, and it is the reason the parser is where the interesting
-work lives.
+A parser translates a source format into the supported schema. Existing downstream
+components operate on those rows according to their own mappings: FTS indexes cover
+files, daemons, and atoms; STIX and diff support defined entity types; resolution
+requires an atom projection. Adding a table alone does not add all integrations.
 
-**What a parser's output gets, with zero additional code:**
-
-| You emit… | You get for free |
-|-----------|------------------|
-| Rows in any entity table (`files`, `binaries`, `daemons`, …) | Full-text search (FTS5), STIX export, sanitization, and structural/natural-key diffing across versions |
-| Temporal `observations` (event rows with a subject + `event_type` + JSON payload) | Time-diffing via `observation_diff` — "what events appeared/changed since the last run" |
-| An entity type registered in `ATOM_PROJECTIONS` (a few lines of declarative SQL) | **Cross-source resolution** — the resolver clusters "the same entity across two different builds" into one canonical identity |
-
-So a new capability is, at minimum, one parser (source-specific), plus optionally one
-atom projection (to make a new entity type resolvable). The amount of engine you plug
-into dwarfs the amount of code you write.
-
-**"If done right"** means modeling the source into entities, relationships, and
-observations — not just dumping file rows. A parser that only lists files gets search
-and diffing; a parser that models *what the source actually is* lights up resolution
-and temporal analysis on data whose shape you defined minutes ago.
+Model entities, relationships, and observations explicitly. Validate new mappings,
+source trust boundaries, and failure cases with fixtures. Sanitization runs under
+the configured policy and does not prove universal absence of private data.
 
 ## Building your own
 
@@ -77,7 +62,7 @@ If either sample budget is exhausted, ICARUS refuses to select from incomplete
 evidence and requests an explicit `--parser`. Supplying `--parser` bypasses the
 detection sample.
 
-This means CloudTrail (specificity 5) always beats Windows (20) which always beats generic (100). If you write a parser with specificity 10, it automatically slots between CloudTrail and Windows.
+Among matching candidates, CloudTrail (specificity 5) precedes Windows (20), which precedes generic (100). If you write a parser with specificity 10, it automatically slots between CloudTrail and Windows.
 
 ### 3. Two-Tier Catalog
 
@@ -132,7 +117,9 @@ icarus parser test windows
 The compact fixture corpus and golden files ship with ICARUS, so the command
 works from an installed wheel without access to the repository's `tests/` tree.
 
-All 8 production parsers pass all 4 gates; the 1 candidate parser is under evaluation.
+Run the harness against the installed revision to verify its declared fixtures.
+Production tier records a parser's declared qualification; it does not guarantee
+behavior for every source. The macOS parser remains candidate-tier.
 
 ## Quality Tiers
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "icarus-framework"
-version = "4.0.0b1"
+version = "4.0.0b2"
 description = "Extract entities from structured data sources into queryable SQLite databases"
 readme = "README.md"
 license = {text = "PolyForm-Noncommercial-1.0.0"}
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["intelligence", "analysis", "sqlite", "diffing", "security", "ontology", "entities"]
 dependencies = [
-    "hygeia @ git+https://github.com/Indegosblade/HYGEIA.git@293211ad25eea859f89a4276937f1a1ad82d1a94",
+    "hygeia @ git+https://github.com/Indegosblade/HYGEIA.git@ec6522c979a335c29858e197e051524a7ccf9cf3",
     "pyyaml>=6.0",
     "jsonschema>=4.20",
 ]

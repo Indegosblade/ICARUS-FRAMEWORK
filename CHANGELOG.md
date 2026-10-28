@@ -6,13 +6,19 @@ All notable changes to this project are documented here. The format is based on
 
 Version identity note: historical Git tags, GitHub releases, and `pyproject` versions
 diverged during early development. The project is moving forward monotonically; see the
-`4.0.0b1` beta line once released. Do not rely on pre-4.0 tags for reproducibility.
+`4.0.0b2` beta line once released. Do not rely on pre-4.0 tags for reproducibility.
 
 ## [Unreleased]
 
-Public-release readiness remediation toward the first public beta (`4.0.0b1`).
+Changes targeting `4.0.0b2`. This section describes the current development
+line; it does not announce a tagged release.
 
 ### Added
+- Local read-only ontology explorer with loopback session capability, bounded
+  queries, provenance, and recorded relationships ([PR #109](https://github.com/Indegosblade/ICARUS-FRAMEWORK/pull/109)).
+- Explicit source-identity privacy and completed-legacy-artifact remediation
+  policy, with audit version 2 ([#112](https://github.com/Indegosblade/ICARUS-FRAMEWORK/issues/112)).
+- Simplified getting-started guides, command/API references, and documentation navigation.
 - `SECURITY.md`, `CONTRIBUTING.md`, and this `CHANGELOG.md` (public-project posture),
   plus a threat model (`docs/THREAT_MODEL.md`).
 - Hostile-filesystem-input hardening and regression suite: in-root symlinks are
@@ -23,13 +29,23 @@ Public-release readiness remediation toward the first public beta (`4.0.0b1`).
 - `query --allow-unverified` to inspect a database whose sanitization failed (#77).
 
 ### Changed
+- Checkpoints use the complete output filename and validate legacy ownership.
+  Public source identities use HMAC with recovery keys kept in private checkpoint
+  state ([#112](https://github.com/Indegosblade/ICARUS-FRAMEWORK/issues/112)).
+- SQLite sanitization and verification share a canonical carrier catalog covering
+  supported text and encoded BLOB values, generated columns, and legitimate
+  internal-name lookalikes ([#115](https://github.com/Indegosblade/ICARUS-FRAMEWORK/issues/115)).
+- Public writable queries and initializer metadata updates revoke stale audit
+  evidence transactionally ([PR #116](https://github.com/Indegosblade/ICARUS-FRAMEWORK/pull/116)).
+- Service identity queries distinguish explicit declarations from unknown users;
+  query labels describe configuration evidence ([PR #113](https://github.com/Indegosblade/ICARUS-FRAMEWORK/pull/113)).
 - Cross-source resolution publishes a new database only after sanitization and its
-  final verification gate succeed. Inputs must be distinct, checkpointed snapshots;
+  final verification gate succeed ([PR #111](https://github.com/Indegosblade/ICARUS-FRAMEWORK/pull/111)). Inputs must be distinct, checkpointed snapshots;
   existing outputs are refused. `--allow-unverified` permits input recovery while
   keeping output sanitization mandatory (#108).
 - Atomization and resolver mutations revoke old sanitization evidence in the same
   transaction as their writes, including committed partial-failure results (#108).
-- Pin HYGEIA to the reviewed 3.15.0 commit with error propagation and verified
+- Pin HYGEIA to the reviewed 3.15.1 commit with error propagation and verified
   external-content FTS5 rebuilding. Development coverage and distribution-build
   tooling use the same validated versions locally and in the workflow.
 - Maturity classifier corrected from `Production/Stable` to `Beta`; README states the

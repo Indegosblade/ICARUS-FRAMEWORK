@@ -1,173 +1,118 @@
-# ICARUS Architecture
+# Architecture
 
-## Design Philosophy
+ICARUS is a local pipeline and SQLite analysis library. Parsers turn source
+formats into normalized entities, relationships, and observations. Downstream
+components query or transform the supported schema. The current schema is v6;
+[ontology v7](../docs/ONTOLOGY_DESIGN.md) is a separate design proposal.
 
-Structured data sources contain implicit relationships that are invisible at the individual-file level but obvious at the relational-query level. ICARUS makes those relationships queryable.
+## Components and data flow
 
----
-
-## Component Map
-
-```
-+-------------------------------------------------------------------+
-|                          PIPELINE                                  |
-|  Phase orchestrator, checkpoint/resume, streaming                  |
-+-------------------------------------------------------------------+
-|         |              |              |               |            |
-|    +----v----+    +----v----+    +----v----+    +----v----+        |
-|    | PARSER  |    | SCHEMA  |    |  QUERY  |    |RESOLVER |        |
-|    |Registry |    | Manager |    | Engine  |    | Entity  |        |
-|    |9 total  |    |         |    |         |    | Resolve |        |
-|    +----+----+    +----+----+    +----+----+    +----+----+        |
-|         |              |              |              |              |
-|         +------- ------+---------- ---+--------------+             |
-|                        |              |                            |
-|                   +----v----+    +----v--------+                   |
-|                   | SQLite  |    | TWO-GRAPH   |                   |
-|                   |  + FTS5 |    | Ontology +  |                   |
-|                   +----+----+    | Event Graph |                   |
-|                        |         +-------------+                   |
-|              +---------+---------+                                 |
-|              |         |         |                                 |
-|         +----v----+ +--v-----+ +v--------+                        |
-|         | DIFFER  | | HYGEIA | |  STIX   |                        |
-|         | Cross-  | |Sanitize| | Export  |                        |
-|         | version | | Output | | 2.1     |                        |
-|         +---------+ +--------+ +---------+                        |
-+-------------------------------------------------------------------+
+```text
+immutable source snapshot
+  -> bounded parser detection or explicit parser
+  -> pipeline: initialize -> ingest -> relationships -> verify
+              -> optional experimental resolution
+              -> sanitize -> finalize -> final audit
+  -> SQLite entities, foreign-key relationships, observations, provenance
+       -> read-only query / local explorer
+       -> frozen snapshot comparison
+       -> guarded STIX export
 ```
 
----
+| Component | Ownership |
+| --- | --- |
+| Parser registry and manifests | Discovery, source identification, declared capabilities, and test resources. |
+| Pipeline | Phase ordering, output lease, checkpoint recovery, run identity, and final completion. |
+| Schema manager | DDL, migrations, indexes, views, connection configuration, and guarded metadata updates. |
+| HYGEIA integration | Canonical sanitization, separate content verification, audit policy, and invalidation. |
+| Query and explorer | Bounded inspection; writable query operations require explicit opt-in. |
+| Differ | Read-only comparison of frozen snapshots by supported natural keys. |
+| Resolver | Experimental candidate generation, scoring, grouping, and recorded resolution history. |
+| STIX integration | Supported entity/diff mappings and artifact admission. |
 
-## Data Flow
+## Storage and provenance
 
-```
-Source --> Parser.identify() --> Parser.extract_entities() --> SQLite
-                                                                |
-                              Parser.extract_relationships() <--+
-                                                                |
-                                           Schema.verify() <----+
-                                                                |
-                                     HYGEIA.sanitize_output() <-+
-                                                                |
-                                            QueryEngine <-------+
-                                                 |
-                                    +------------+------------+
-                                    |            |            |
-                                  SQL      FTS5 Search     Views
-```
+SQLite avoids a separate database service and supports relational joins plus FTS5.
+A database is portable after committed WAL state has been checkpointed into its
+main file. Copying a live main file without its WAL can omit committed data.
 
----
+Ontology tables store extracted files, binaries, daemons, Mach services,
+entitlements, sandbox metadata, kexts, and frameworks. Observations record temporal
+events. Resolution uses atoms, bags, memberships, candidates, and an event log.
+See the [schema reference](../wiki/Schema-Reference.md); authoritative DDL lives in
+[icarus/core/schema.py](../icarus/core/schema.py).
 
-## Design Decisions
+Entity provenance includes source version, confidence, observation time, and
+marking. These are row-level attributes; the schema does not provide a separate
+provenance record for every cell. Run metadata and protected source identity are
+described in [artifact privacy](../docs/SOURCE_IDENTITY_PRIVACY.md).
 
-### SQLite, Not Postgres
+Migrations cover supported v2–v5 databases through v6. Initialization/build setup
+may migrate an input; read-only query and explorer operations do not.
 
-Single-file database. No server process, no configuration. The output is one `.db` file you can copy anywhere and query with any SQLite client. The only runtime dependency is Python's built-in `sqlite3` module.
+## Transactions and recovery
 
-### Streaming Extraction
+The pipeline leases each output before changing run identity or checkpoint state.
+Linux and Windows ingestion commit rows, provenance, and cursor progress together;
+an interrupted batch replays without advancing progress past its durable data.
+Other parsers retain phase-level replay. Keep the source immutable: resume does
+not rehash every previously processed file.
 
-Parsers process records individually with periodic commits. Source data is never loaded into memory as a whole. SQLite memory-mapped I/O and page cache scale to available system RAM automatically. The streaming design ensures correctness (bounded memory regardless of source size), not artificial memory restriction.
+Output databases and private checkpoints are separate stores. Their recovery
+protocol explicitly orders private intent and public version binding; it is not
+a distributed atomic transaction. Legacy checkpoint adoption validates ownership
+and refuses ambiguous state. See [ingest recovery](../docs/INGEST_RECOVERY.md).
 
-### Safe Traversal
+CLI `--fresh` builds into a sibling temporary database and replaces the destination
+after successful completion. Cross-source `resolve` similarly publishes only a
+new, fully processed output. Direct parser calls and unrelated external writers
+are outside pipeline coordination.
 
-Parsers use `os.walk(onerror=lambda e: None)` instead of `pathlib.rglob()`. This handles broken symlinks, inaccessible paths, and permission-denied directories without crashing the pipeline. SQLite connections are wrapped in `try/finally` so they release on any failure.
+## Input and trust boundaries
 
-### Parser Ecosystem
+Built-in parser reads require regular files and reject symlink traversal. Special
+files are skipped; links can be cataloged as metadata. Format-specific byte,
+record, archive, and detection budgets constrain materialized input. Extraction
+is incremental, but memory use still depends on bounded input units and directory
+listings; it is not constant for every possible source.
 
-The framework itself has no knowledge of platform-specific formats. Parsers provide that. Each parser ships with a YAML manifest (validated by JSON Schema), declares a quality tier and specificity level, and participates in a registry contest for auto-detection. Generic fallback parsers ensure every directory produces output. The candidate `macos` parser targets iOS/macOS daemon attack-surface mapping, reading Mach-O entitlements with a self-contained stdlib reader — no external `codesign` or `ldid`.
+HYGEIA runs before completion, followed by a separate ICARUS content-verification
+pass. Both use the canonical SQLite carrier catalog. This detects failures within
+the configured policy; it is not independent carrier enumeration or universal
+PII detection. Unsupported carrier states fail closed. See
+[SQLite carriers](../docs/SQLITE_CARRIERS.md).
 
-A test harness enforces 4 quality gates: golden output match, idempotency, schema conformance, and zero-PII verification.
+Artifact audit metadata is mutable state. Supported writes revoke evidence in the
+same transaction as data changes; raw external SQLite writes bypass that guard.
+Read-only access does not make unsanitized content safe to disclose. See
+[public writes](../docs/PUBLIC_WRITES.md) and the [threat model](../docs/THREAT_MODEL.md).
 
-### First-Class Diffing
+Parser plugins execute Python code in the analyst's process and are trusted code.
+Install only extensions you trust. Private parser modules are local extensions
+excluded from public package artifacts.
 
-The differ attaches two databases and runs set-difference queries directly in SQLite. Five diff categories cover additions, deletions, property changes, structural topology changes, and resolution changes.
+## Interpretation and deployment limits
 
-### Built-in Sanitization
+Mach-service, entitlement, and service-user relationships describe extracted
+declarations. Historical view names do not establish effective privilege,
+reachability, or exploitation. See [service identity](../docs/SERVICE_IDENTITY.md).
 
-HYGEIA runs as a pipeline phase, not a separate post-processing step. PII is stripped before the database is marked complete.
+The experimental resolver generates candidates, scores them, clusters accepted
+edges, and records group changes. Candidate scores and calibration results are
+evidence about a model on specific data, not proof of identity across all sources.
 
-### Cell-Level Provenance
+The [local explorer](../docs/ONTOLOGY_EXPLORER.md) exposes fixed read-only queries
+on loopback with a per-session capability. It is a single-user inspection tool.
+Multi-user hosting requires its own authorization, audit, and isolation design.
 
-Every entity row carries:
-- `source_version_id` — which pipeline run produced it (FK to `versions`)
-- `confidence` — 0.0-1.0, parser confidence
-- `observed_time` — ISO 8601 timestamp
-- `marking` — access classification: `UNCLASSIFIED`, `PII`, `SENSITIVE`, `REDACTED`
+## Extension points
 
-The `versions` table records every pipeline run with UUID, parser name, source path, timestamps, and entity count.
+| Need | Implementation and validation |
+| --- | --- |
+| New source format | `BaseParser`, YAML manifest, and parser fixture gates. |
+| New entity type | Schema/migration plus explicit search, diff, atomization, export, and verification coverage as applicable. |
+| New query | Bounded `IcarusQuery` helper with documented evidence semantics. |
+| New sanitization rule | Canonical HYGEIA policy and positive/negative regression cases. |
+| New export | Integration with explicit supported mappings and admission policy. |
 
-### Two-Graph Architecture
-
-A single database contains two complementary graphs:
-
-- **Ontology graph** — entities (files, binaries, daemons, kexts, frameworks) and their relationships. Structural, slow-moving.
-- **Event graph** — observations (temporal events) and resolution decisions (atoms grouped into bags). Temporal, fast-moving.
-
-Cross-graph queries join them naturally.
-
-### Entity Resolution (Atom/Bag/EventLog)
-
-When the same entity appears in different sources under different identifiers:
-
-- **Atoms** — immutable property bundles. One per observation per source. Never modified.
-- **Bags** — resolved entity groups. Merge and split with full reversibility.
-- **Event log** — append-only record of every resolution decision.
-
-Candidate pairs are generated by exact-key blocking (an equality bucket on a chosen key) rather than an O(n^2) all-pairs comparison. The resolver is experimental and excluded from the beta stability promise.
-
-### STIX 2.1 Interoperability
-
-ICARUS entities map to STIX 2.1 objects:
-- `files` -> File SCO
-- `binaries` -> File SCO with extensions
-- `daemons` -> Infrastructure SDO
-- `entitlements` -> Course of Action SDO
-- `observations` -> Observed Data SDO for SCO targets; Sighting SRO for SDO targets
-
-Diffs export as STIX Note objects with addition, deletion, property-change,
-and structural classifications.
-
----
-
-## Schema (v6)
-
-17 normalized tables. 3 FTS indexes. 3 intelligence views. The authoritative DDL lives
-in `icarus/core/schema.py`; `schema/icarus_schema.sql` is a generated v6 reference dump.
-
-| Layer | Tables |
-|-------|--------|
-| Ontology | files, binaries, daemons, mach_services, entitlements, sandbox_profiles, sandbox_rules, kexts, frameworks |
-| Infrastructure | metadata, versions |
-| Events | observations |
-| Resolution | atoms, bags, bag_atoms, resolution_event_log, match_candidates |
-| Search | files_fts, daemons_fts, atoms_fts |
-| Views | v_sandbox_escape_surface, v_kernel_attack_surface, v_test_binaries |
-
-`mach_services` links each configured launchd Mach-service name to the job
-declaring it. The join supports configuration inspection; it does not verify
-runtime registration or client access. `match_candidates` (added in v6) records
-audited scored atom pairs from the experimental resolver.
-
-The view names are historical compatibility surfaces. `v_sandbox_escape_surface`
-joins Mach-service and entitlement declarations with no recorded profile; its
-`privileged_entitlements` column inventories all joined keys without proving
-privilege or an escape. `v_kernel_attack_surface` selects user-client metadata
-candidates, without proving effective reachability. The query helpers use
-[evidence-limited result labels](../docs/SERVICE_IDENTITY.md).
-
-Migration chain: v2 -> v3 -> v4 -> v5 -> v6. `initialize_database()` and build
-setup apply migrations; read-only consumers leave the input schema untouched.
-
----
-
-## Extension Points
-
-| What | How |
-|------|-----|
-| New data source | Implement `BaseParser` + YAML manifest |
-| New entity type | Add table to schema, extend parser extraction |
-| New intelligence query | Add method to `IcarusQuery` |
-| New sanitization rule | Add pattern to HYGEIA integration |
-| New diff dimension | Add method to `IcarusDiffer` |
-| New export format | Add module to `integrations/` |
+See [parser development](PARSERS.md) and [contributing](../CONTRIBUTING.md).

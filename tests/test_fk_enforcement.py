@@ -110,12 +110,14 @@ def test_no_parser_output_path_bypasses_open_db():
     assert bare_connections == {"generic/sqlite_parser.py": ["src_uri"]}
 
 
-def test_pipeline_raw_connections_are_checkpoint_only():
+def test_pipeline_raw_connections_are_private_or_ephemeral_not_output_writers():
     pipeline_path = Path(__file__).parents[1] / "icarus" / "core" / "pipeline.py"
-    assert _sqlite_connect_arguments(pipeline_path) == [
-        "str(self.checkpoint_db)",
-        "str(self.checkpoint_db)",
-        "str(self.checkpoint_db)",
-        "str(self.checkpoint_db)",
-        "str(self.checkpoint_db)",
-    ]
+    # Private checkpoints have no entity FKs. The in-memory fresh-schema
+    # reference carries no user data; URI calls only inspect checkpoint state.
+    # Check the allowed targets, not an incidental count of helper calls.
+    allowed = {
+        "str(self.checkpoint_db)", "':memory:'",
+        "checkpoint.resolve().as_uri() + '?mode=ro'",
+        "self.checkpoint_db.resolve().as_uri() + '?mode=ro'",
+    }
+    assert set(_sqlite_connect_arguments(pipeline_path)) <= allowed

@@ -1,25 +1,17 @@
-# Parser Development Guide
+# Parser development guide
 
-A parser is the only source-specific code in ICARUS. Everything downstream — schema,
-FTS5 search, the cross-version differ, entity resolution, STIX export, and the
-fail-closed sanitizer — is source-agnostic, so a parser that emits rows into the entity
-tables inherits all of it for free. Your job is to turn one messy input into normalized
-entities, relationships, and observations; the engine does the rest.
+A parser translates source data into normalized entities, relationships, and
+observations. Implement `BaseParser`, declare its capabilities in a YAML manifest,
+and validate source-specific behavior with fixtures.
 
-The payoff scales with how well you model the source:
+Existing integrations operate on explicit schema mappings. FTS indexes cover
+files, daemons, and atoms; STIX and diff support defined types; experimental
+resolution requires an `ATOM_PROJECTIONS` entry. Adding a new table does not
+automatically provide these capabilities.
 
-- Emit **entity rows** → they are immediately searchable (FTS5), diffable across
-  versions, exportable to STIX, and sanitized.
-- Emit **observations** (temporal events) → `observation_diff` gives you
-  "what changed over time" for free.
-- Register your entity type in `ATOM_PROJECTIONS`
-  ([`icarus/core/atomize.py`](../icarus/core/atomize.py)) — a short declarative
-  projection — → the resolver clusters that entity type **across builds** into one
-  canonical identity ("the same thing seen in two dumps").
-
-Parsers are also first-class to keep private: anything under the gitignored
-`icarus/parsers/private/` package registers and runs exactly like a shipped parser but
-never enters git (see [Registration](#registration)).
+Private modules under the gitignored `icarus/parsers/private/` package use the
+same discovery mechanism and are excluded from public package artifacts. Plugins
+execute trusted Python code in the caller's process; review them before installing.
 
 ## Production Parsers
 

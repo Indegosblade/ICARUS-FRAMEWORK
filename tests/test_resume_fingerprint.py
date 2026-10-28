@@ -204,7 +204,6 @@ def test_resume_refuses_missing_checkpoint_version_metadata(tmp_path, missing_ke
     conn.execute("DELETE FROM checkpoint_meta WHERE key = ?", (missing_key,))
     conn.commit()
     conn.close()
-
     resumed = Pipeline(source, output, parser_name="demo", fingerprint=fingerprint)
     resumed.add_phase("complete", lambda ctx: {"ok": True})
     resumed.add_phase("crash", lambda ctx: {"ok": True})
@@ -249,6 +248,15 @@ def test_resume_refuses_mismatched_version_identity(
         conn.execute("UPDATE versions SET metadata = NULL")
     conn.commit()
     conn.close()
+    if column == "source_path":
+        checkpoint = sqlite3.connect(crashed.checkpoint_db)
+        try:
+            checkpoint.execute("DELETE FROM checkpoint_meta WHERE key IN "
+                               "('identity_protocol','identity_state','identity_intent',"
+                               "'source_identity_key')")
+            checkpoint.commit()
+        finally:
+            checkpoint.close()
 
     resumed = Pipeline(source, output, parser_name="demo", fingerprint=fingerprint)
     resumed.add_phase("complete", lambda ctx: {"ok": True})

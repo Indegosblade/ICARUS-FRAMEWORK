@@ -38,6 +38,35 @@ depending on that cleanup. A different source, parser, or active run is refused.
 The private progress tables are removed after successful extraction and never
 appear in a completed output.
 
+Pipeline checkpoints are named for the complete output filename:
+`out.db` uses `.out.db.icarus-checkpoint.db`, while `out.sqlite` uses
+`.out.sqlite.icarus-checkpoint.db`. Their output leases and checkpoints are
+independent. New checkpoint metadata also binds the state to its canonical
+output URI.
+
+Older releases used `.out_checkpoint.db` for both filenames. The constructor
+does not change existing files. Resume inspection validates an old checkpoint's
+run/version against the actual output under the output lease and a shared
+legacy-namespace lease. An owned, compatible checkpoint is moved to the new
+name only when the run starts; the read-only resumability predicate does not
+move or delete it. Foreign legacy state is preserved. A non-resuming run can
+discard only state proven to belong to its own output. Malformed or conflicting
+owned states, or legacy state with a nonempty WAL/journal, are preserved and
+refused with recovery guidance. Close/recover the old writer before resuming,
+or use `--fresh`/a separate output for a new build.
+
+Source identity uses a private-checkpoint HMAC key, rather than a publicly
+guessable source-path hash. The private key and run/output/config intent commit
+before the dependent public version, and checkpoint binding commits afterward.
+An interrupted prepared intent recovers its exact matching run/HMAC or a proven
+empty initialization; unrelated existing output is refused. Legacy recovery
+persists a private key before replacing the old public identity. This is an
+explicit recovery protocol across two databases, not a claim of a shared atomic
+transaction. Keep checkpoints and their sidecars private; POSIX key files use
+owner-only permissions, and Windows storage requires a private directory ACL.
+See [SOURCE_IDENTITY_PRIVACY.md](SOURCE_IDENTITY_PRIVACY.md) for artifact policy
+and supported completed-legacy remediation when the source is unavailable.
+
 The CLI and `Pipeline.run()` hold an OS-backed output lease before changing run
 identity or checkpoint state. A competing ICARUS build fails before writing;
 `--fresh` keeps the destination leased through final replacement. A persistent
