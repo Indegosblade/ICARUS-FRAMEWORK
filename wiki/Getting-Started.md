@@ -6,7 +6,7 @@
 |-----------|---------|-------|
 | Python | >= 3.10 | Tested on 3.10, 3.12, 3.13 |
 | SQLite | >= 3.35 | Required for FTS5. Ships with Python on all platforms. |
-| [HYGEIA](https://github.com/Indegosblade/HYGEIA) | v3.14.0 | PII sanitization. Auto-installed. |
+| [HYGEIA](https://github.com/Indegosblade/HYGEIA) | v3.15.0 | PII sanitization. Auto-installed from a pinned commit. |
 | [PyYAML](https://pyyaml.org/) | >= 6.0 | Parser manifest loading |
 | [jsonschema](https://python-jsonschema.readthedocs.io/) | >= 4.20 | Manifest validation |
 

@@ -121,7 +121,8 @@ def test_post_sanitization_failure_can_resume_with_redacted_source_path(tmp_path
     with closing(sqlite3.connect(output)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM versions").fetchone() == (1,)
         metadata = json.loads(conn.execute("SELECT metadata FROM versions").fetchone()[0])
-        assert len(metadata["source_identity_sha256"]) == 64
+        assert len(metadata["source_identity"]["digest"]) == 64
+        assert "source_identity_sha256" not in metadata
 
 
 def test_source_identity_digest_is_bound_to_its_original_run(tmp_path):
@@ -151,6 +152,10 @@ def test_legacy_run_without_digest_still_resumes_by_exact_path(tmp_path):
         pipeline.run()
     with closing(sqlite3.connect(output)) as conn:
         conn.execute("UPDATE versions SET metadata = NULL")
+        conn.commit()
+    with closing(sqlite3.connect(pipeline.checkpoint_db)) as conn:
+        conn.execute("DELETE FROM checkpoint_meta WHERE key IN "
+                     "('identity_protocol','identity_state','identity_intent','source_identity_key')")
         conn.commit()
     resumed = Pipeline(tmp_path, output, parser_name="test")
     resumed.add_phase("ingest", lambda _ctx: {"ok": True})

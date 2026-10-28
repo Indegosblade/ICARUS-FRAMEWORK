@@ -1,5 +1,6 @@
 """Output checkpoint ownership and compatibility with interrupted legacy runs."""
 
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -14,6 +15,7 @@ from icarus.core.pipeline import (
     CheckpointFingerprintMismatch,
     CheckpointProvenanceError,
     Pipeline,
+    _source_identity_digest,
     create_default_pipeline,
 )
 from icarus.parsers.windows import WindowsParser
@@ -35,13 +37,24 @@ def _interrupted(source, output, *, legacy=False, fingerprint=None):
     with pytest.raises(RuntimeError, match="interrupted"):
         pipeline.run(resume=False)
     if legacy:
-        with closing(sqlite3.connect(pipeline.checkpoint_db)) as conn:
-            conn.execute("DELETE FROM checkpoint_meta WHERE key = 'output_uri'")
-            conn.commit()
-        legacy_path = output.parent / f".{output.stem}_checkpoint.db"
-        if pipeline.checkpoint_db != legacy_path:
-            pipeline.checkpoint_db.replace(legacy_path)
+        _as_legacy(pipeline)
     return pipeline
+
+
+def _as_legacy(pipeline):
+    with closing(sqlite3.connect(pipeline.output)) as conn:
+        conn.execute("UPDATE versions SET metadata=? WHERE id=?",
+                     (json.dumps({"source_identity_sha256": _source_identity_digest(
+                         pipeline.source, pipeline.context.run_id)}), pipeline.context.version_id))
+        conn.commit()
+    with closing(sqlite3.connect(pipeline.checkpoint_db)) as conn:
+        conn.execute("DELETE FROM checkpoint_meta WHERE key IN "
+                     "('output_uri','identity_protocol','identity_state','identity_intent',"
+                     "'source_identity_key')")
+        conn.commit()
+    legacy_path = pipeline.output.parent / f".{pipeline.output.stem}_checkpoint.db"
+    if pipeline.checkpoint_db != legacy_path:
+        pipeline.checkpoint_db.replace(legacy_path)
 
 
 def test_constructor_is_filesystem_pure_and_namespaces_full_filename(tmp_path):
@@ -262,11 +275,8 @@ def test_cli_recognizes_and_resumes_old_interrupted_database(tmp_path, monkeypat
     with pytest.raises(RuntimeError, match="interrupted file extraction"):
         crashed.run()
     monkeypatch.setattr(WindowsParser, "_safe_hash", staticmethod(original_hash))
-    with closing(sqlite3.connect(crashed.checkpoint_db)) as conn:
-        conn.execute("DELETE FROM checkpoint_meta WHERE key='output_uri'")
-        conn.commit()
+    _as_legacy(crashed)
     legacy = tmp_path / ".out_checkpoint.db"
-    crashed.checkpoint_db.replace(legacy)
     cmd_build(Namespace(source=str(source), output=str(output), parser="windows",
                         fresh=False, skip_hygeia=True, resolve=False))
     assert not legacy.exists()

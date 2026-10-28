@@ -6,8 +6,12 @@ saving progress at each checkpoint. Crash at phase N? Resume from phase N.
 """
 
 import hashlib
+import hmac
 import json
+import os
+import secrets
 import sqlite3
+import stat
 import time
 import uuid
 from datetime import datetime, timezone
@@ -15,9 +19,19 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional
 
 from icarus.core.build_lock import output_lease
-from icarus.core.schema import ENTITY_TABLES, open_db
+from icarus.core.schema import (
+    CORE_SCHEMA,
+    ENTITY_TABLES,
+    FTS_SCHEMA,
+    FTS_TRIGGERS,
+    INDEXES,
+    SCHEMA_VERSION,
+    VIEWS,
+    open_db,
+)
 
 PROVENANCE_ENTITY_TABLES = (*ENTITY_TABLES, "mach_services")
+SOURCE_IDENTITY_PROTOCOL = "hmac-sha256-v1"
 
 
 class CheckpointFingerprintMismatch(ValueError):
@@ -89,13 +103,14 @@ def _canonical_fingerprint(fingerprint: dict) -> str:
 
 
 def _source_identity_digest(source: Path, run_id: str) -> str:
-    """Bind one run to its source path without persisting that raw identity label.
-
-    This is a per-run path identity, not a source-content hash or an attestation.
-    Source contents must still remain immutable across an interrupted build.
-    """
+    """Read-only compatibility for deprecated, publicly guessable path hashes."""
     value = f"{run_id}\0{Path(source).resolve()}"
     return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _source_identity_hmac(source: Path, run_id: str, key: bytes) -> str:
+    value = f"{run_id}\0{Path(source).resolve()}"
+    return hmac.new(key, value.encode("utf-8", "surrogatepass"), hashlib.sha256).hexdigest()
 
 
 class PipelinePhase:
@@ -152,6 +167,9 @@ class Pipeline:
         self.checkpoint_db = self.output.parent / f".{self.output.name}.icarus-checkpoint.db"
         self.legacy_checkpoint_db = self.output.parent / f".{self.output.stem}_checkpoint.db"
         self.context = PipelineContext(self.source, self.output, parser_name)
+        self._source_identity_key: Optional[bytes] = None
+        self._recover_empty_output = False
+        self._identity_upgrade_pending = False
 
     def add_phase(self, name: str, handler: Callable, description: str = "") -> None:
         """Append a processing phase to the pipeline."""
@@ -374,14 +392,31 @@ class Pipeline:
             raise CheckpointProvenanceError(
                 "Cannot create a resumable checkpoint without an active versions row"
             )
-        conn = sqlite3.connect(str(self.checkpoint_db))
+        self._persist_identity_intent("bound")
+
+    def _identity_intent(self) -> str:
+        return _canonical_fingerprint({
+            "source": str(self.source.resolve()), "parser_name": self.parser_name,
+            "skip_hygeia": self.skip_hygeia, "fingerprint": self.fingerprint,
+        })
+
+    def _persist_identity_intent(self, state: str = "prepared") -> None:
+        """Durably store the private key before publishing any dependent HMAC."""
+        conn = self._private_checkpoint_connection()
         try:
+            if self._source_identity_key is None:
+                self._source_identity_key = secrets.token_bytes(32)
             self._ensure_checkpoint_schema(conn)
             metadata = {
                 "run_id": self.context.run_id,
-                "version_id": str(self.context.version_id),
                 "output_uri": self.output.resolve().as_uri(),
+                "identity_protocol": SOURCE_IDENTITY_PROTOCOL,
+                "identity_state": state,
+                "identity_intent": self._identity_intent(),
+                "source_identity_key": self._source_identity_key.hex(),
             }
+            if self.context.version_id is not None:
+                metadata["version_id"] = str(self.context.version_id)
             if self.fingerprint is not None:
                 metadata["fingerprint"] = _canonical_fingerprint(self.fingerprint)
             conn.executemany(
@@ -392,6 +427,162 @@ class Pipeline:
         finally:
             conn.close()
 
+    def _private_checkpoint_connection(self) -> sqlite3.Connection:
+        flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self.checkpoint_db, flags, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            os.close(fd)
+        entry = self.checkpoint_db.lstat()
+        if (
+            not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1
+            or getattr(entry, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        ):
+            raise CheckpointProvenanceError(
+                "Private checkpoint must be a regular file with no aliases; preserving it"
+            )
+        if os.name != "nt":
+            os.chmod(self.checkpoint_db, 0o600)
+        return sqlite3.connect(str(self.checkpoint_db))
+
+    def _read_private_identity(self, metadata: dict) -> bytes:
+        try:
+            if metadata["identity_protocol"] != SOURCE_IDENTITY_PROTOCOL:
+                raise ValueError("Unsupported identity protocol")
+            if metadata["identity_intent"] != self._identity_intent():
+                raise ValueError("Changed identity intent")
+            key = bytes.fromhex(metadata["source_identity_key"])
+            if len(key) != 32:
+                raise ValueError("Invalid key length")
+            return key
+        except (KeyError, TypeError, ValueError):
+            raise CheckpointProvenanceError(
+                "Private resume identity is missing, invalid, or belongs to a "
+                "different source/config; preserving all artifacts. Use --fresh."
+            ) from None
+
+    def _public_identity(self) -> dict:
+        key = self._source_identity_key
+        if key is None:
+            raise CheckpointProvenanceError("Private resume identity was not prepared")
+        return {"version": 1, "algorithm": "hmac-sha256", "digest": _source_identity_hmac(
+            self.source, self.context.run_id, key,
+        )}
+
+    def _empty_prepared_output(self) -> bool:
+        """Recognize an empty new output, never an unrelated existing dataset."""
+        if not self.output.exists():
+            return True
+        conn = open_db(self.output, readonly=True)
+        reference = sqlite3.connect(":memory:")
+        try:
+            for ddl in (CORE_SCHEMA, INDEXES, FTS_SCHEMA, FTS_TRIGGERS, VIEWS):
+                reference.executescript(ddl)
+            reference.execute("INSERT INTO metadata VALUES ('schema_version', ?)",
+                              (str(SCHEMA_VERSION),))
+            expected = {
+                (row[0], row[1]): row[2] for row in reference.execute(
+                    "SELECT name,type,sql FROM sqlite_master"
+                )
+            }
+            objects = conn.execute(
+                "SELECT name,type,sql FROM sqlite_master"
+            ).fetchall()
+            for name, kind, ddl in objects:
+                known = expected.get((name, kind))
+                if (
+                    (name, kind) not in expected
+                    or " ".join((ddl or "").split()) != " ".join((known or "").split())
+                ):
+                    return False
+                if kind != "table":
+                    continue
+                # Every identifier is from the fixed fresh-schema reference.
+                quoted = '"' + name.replace('"', '""') + '"'
+                columns = [row[1] for row in reference.execute(
+                    f"PRAGMA table_info({quoted})"  # nosec B608 - fresh schema reference owns name
+                )]
+                fields: list[str] = []
+                for column in columns:
+                    qcolumn = '"' + column.replace('"', '""') + '"'
+                    fields.extend((f"typeof({qcolumn})", f"length({qcolumn})",
+                                   f"substr({qcolumn},1,256)"))
+                selection = ", ".join(fields)
+                query = f"SELECT {selection} FROM {quoted} LIMIT 9"  # nosec B608 - fresh schema reference owns identifiers
+                fresh_rows = reference.execute(query).fetchall()
+                current_rows = conn.execute(query).fetchall()
+                # A schema-initialization crash can precede the version marker.
+                if name == "metadata" and not current_rows:
+                    continue
+                if current_rows != fresh_rows:
+                    return False
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'"
+            ).fetchone() and conn.execute("SELECT 1 FROM sqlite_sequence LIMIT 1").fetchone():
+                return False
+            return all(conn.execute(f"PRAGMA {setting}").fetchone()[0] == 0  # nosec B608 - settings fixed below
+                       for setting in ("freelist_count", "user_version", "application_id"))
+        finally:
+            reference.close()
+            conn.close()
+
+    def _restore_prepared_identity(self, metadata: dict, key: bytes) -> None:
+        if metadata.get("output_uri") != self.output.resolve().as_uri():
+            raise CheckpointProvenanceError("Prepared intent belongs to another output")
+        conn = sqlite3.connect(self.checkpoint_db.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            if conn.execute("SELECT 1 FROM checkpoints LIMIT 1").fetchone():
+                raise CheckpointProvenanceError(
+                    "Prepared identity unexpectedly contains phase state"
+                )
+        finally:
+            conn.close()
+        self.context.run_id = metadata["run_id"]
+        self.context.version_id = None
+        self._source_identity_key = key
+        self._recover_empty_output = False
+        row = None
+        empty = False
+        try:
+            if self.output.exists():
+                conn = open_db(self.output, readonly=True)
+                try:
+                    if conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='versions'"
+                    ).fetchone():
+                        row = conn.execute(
+                            "SELECT id, parser_name, metadata FROM versions WHERE run_id=?",
+                            (self.context.run_id,),
+                        ).fetchone()
+                finally:
+                    conn.close()
+            if row is None:
+                empty = self._empty_prepared_output()
+        except sqlite3.Error:
+            raise CheckpointProvenanceError(
+                "Prepared run cannot establish ownership of this output; preserving "
+                "all artifacts. Recover the original pair or use --fresh."
+            ) from None
+        if row is not None:
+            try:
+                details = json.loads(row[2] or "{}")
+                identity = details.get("source_identity") if isinstance(details, dict) else None
+            except (TypeError, ValueError, RecursionError):
+                identity = None
+            if row[1] != self.parser_name or identity != self._public_identity():
+                raise CheckpointProvenanceError("Prepared run does not match its output identity")
+            self.context.version_id = row[0]
+        elif empty:
+            self._recover_empty_output = True
+        else:
+            raise CheckpointProvenanceError(
+                "Prepared run has no matching version in this nonempty output; "
+                "preserving it rather than creating an implicit union. Use --fresh."
+            )
+
     def _restore_version_identity(self) -> None:
         """Restore and validate the original run identity before resume."""
         if not self.checkpoint_db.exists():
@@ -399,8 +590,7 @@ class Pipeline:
         conn = sqlite3.connect(str(self.checkpoint_db))
         try:
             rows = conn.execute(
-                "SELECT key, value FROM checkpoint_meta "
-                "WHERE key IN ('run_id', 'version_id', 'output_uri')"
+                "SELECT key, value FROM checkpoint_meta"
             ).fetchall()
         except sqlite3.OperationalError as error:
             raise CheckpointProvenanceError(
@@ -419,6 +609,20 @@ class Pipeline:
                 "Checkpoint belongs to a different output path; preserving it. "
                 "Recover the original database/checkpoint pair or use --fresh."
             )
+        protocol = metadata.get("identity_protocol")
+        if protocol is not None and metadata.get("output_uri") != self.output.resolve().as_uri():
+            raise CheckpointProvenanceError(
+                "Private resume identity has no matching output path; preserving all artifacts"
+            )
+        key = self._read_private_identity(metadata) if protocol is not None else None
+        state = metadata.get("identity_state")
+        if protocol is not None and state == "prepared":
+            if not metadata.get("run_id"):
+                raise CheckpointProvenanceError("Prepared intent has no run identity")
+            if key is None:
+                raise CheckpointProvenanceError("Prepared intent has no private identity")
+            self._restore_prepared_identity(metadata, key)
+            return
         missing = {"run_id", "version_id"} - metadata.keys()
         if missing:
             raise CheckpointProvenanceError(
@@ -469,14 +673,27 @@ class Pipeline:
             mismatches.append("parser_name")
         try:
             version_details = json.loads(version_metadata or "{}")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             version_details = {}
         identity = (
+            version_details.get("source_identity") if isinstance(version_details, dict) else None
+        )
+        legacy_identity = (
             version_details.get("source_identity_sha256")
             if isinstance(version_details, dict) else None
         )
+        if protocol is not None and state not in ("bound", "upgrading"):
+            mismatches.append("private_identity_state")
         if identity is not None:
-            if identity != _source_identity_digest(self.source, metadata["run_id"]):
+            expected_identity = {"version": 1, "algorithm": "hmac-sha256", "digest":
+                                 _source_identity_hmac(self.source, metadata["run_id"], key)
+                                 if key is not None else None}
+            if identity != expected_identity:
+                mismatches.append("source_identity")
+        elif protocol is not None and state == "bound":
+            mismatches.append("source_identity")
+        elif legacy_identity is not None:
+            if legacy_identity != _source_identity_digest(self.source, metadata["run_id"]):
                 mismatches.append("source_identity")
         elif actual_source != expected_source:
             # Older checkpoints lack the digest, so retain their original
@@ -491,6 +708,42 @@ class Pipeline:
 
         self.context.run_id = metadata["run_id"]
         self.context.version_id = version_id
+        self._source_identity_key = key
+        self._identity_upgrade_pending = protocol is None or state == "upgrading"
+
+    def _upgrade_legacy_identity(self) -> None:
+        # The private key must survive a crash before its public HMAC is written.
+        self._persist_identity_intent("upgrading")
+        conn = open_db(self.output)
+        try:
+            from icarus.integrations.hygeia import invalidate_sanitization
+            row = conn.execute(
+                "SELECT metadata FROM versions WHERE id=? AND run_id=?",
+                (self.context.version_id, self.context.run_id),
+            ).fetchone()
+            if row is None:
+                raise CheckpointProvenanceError(
+                    "Original version disappeared during identity upgrade"
+                )
+            try:
+                details = json.loads(row[0] or "{}")
+            except (TypeError, ValueError, RecursionError):
+                raise CheckpointProvenanceError(
+                    "Unsupported version metadata; preserving legacy state"
+                ) from None
+            if not isinstance(details, dict):
+                raise CheckpointProvenanceError(
+                    "Unsupported version metadata; preserving legacy state"
+                )
+            details.pop("source_identity_sha256", None)
+            details["source_identity"] = self._public_identity()
+            conn.execute("UPDATE versions SET metadata=? WHERE id=? AND run_id=?",
+                         (json.dumps(details), self.context.version_id, self.context.run_id))
+            invalidate_sanitization(conn)
+            conn.commit()
+            self._identity_upgrade_pending = False
+        finally:
+            conn.close()
 
     def save_checkpoint(self, phase_index: int, status: str, stats: Optional[dict] = None) -> None:
         """Persist phase completion status for resume-on-crash."""
@@ -534,14 +787,14 @@ class Pipeline:
         version record — and therefore all run provenance — was silently
         skipped, leaving the versions table empty on every first build.
         """
-        if not self.output.exists():
+        if not self.output.exists() or self._recover_empty_output:
             from icarus.core.schema import initialize_database
             initialize_database(self.output)
         conn = open_db(self.output)
         try:
             from icarus.integrations.hygeia import invalidate_sanitization
             conn.execute("""
-                INSERT OR IGNORE INTO versions
+                INSERT INTO versions
                 (run_id, parser_name, source_path, started_at, metadata)
                 VALUES (?, ?, ?, ?, ?)
             """, (
@@ -550,9 +803,7 @@ class Pipeline:
                 str(self.source.resolve()),
                 datetime.now(timezone.utc).isoformat(),
                 json.dumps({
-                    "source_identity_sha256": _source_identity_digest(
-                        self.source, self.context.run_id,
-                    ),
+                    "source_identity": self._public_identity(),
                 }),
             ))
             row = conn.execute(
@@ -620,6 +871,15 @@ class Pipeline:
                 self._clear_checkpoint()
             last_complete = -1
         start = start_phase if start_phase is not None else (last_complete + 1)
+
+        if not restored_identity:
+            self._persist_identity_intent(
+                "bound" if self.context.version_id is not None else "prepared"
+            )
+            if self.context.version_id is not None:
+                self._validate_checkpoint_at(self.checkpoint_db)
+        elif self._source_identity_key is None or self._identity_upgrade_pending:
+            self._upgrade_legacy_identity()
 
         if self.context.version_id is None:
             self._create_version_record()

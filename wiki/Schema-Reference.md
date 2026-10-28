@@ -112,13 +112,24 @@ Pipeline run provenance. One row per `icarus build` execution.
 | entity_count | INTEGER | Total entities ingested |
 | metadata | TEXT | Optional free-form JSON metadata for the run |
 
-New pipeline runs include `source_identity_sha256` in `versions.metadata`: a
-SHA-256 digest of the run ID and resolved source path. Resume validates that
-identity against the original checkpoint's run and version, even after HYGEIA
-redacts the descriptive `source_path`. Older records without this digest retain
-exact raw-path validation. The digest identifies a path within one run; it is
-neither a source-content hash nor an attestation. Source contents must remain
-immutable across resume, and direct SQL can bypass application invariants.
+New pipeline runs include `source_identity` in `versions.metadata`, with
+`version: 1`, `algorithm: "hmac-sha256"`, and a digest. Its random secret key is
+persisted only in the private checkpoint and held in private pipeline memory;
+it is absent from the public database and returned phase context. Resume
+validates the identity against that private state, the output URI, and original
+run/version even after HYGEIA redacts the descriptive `source_path`.
+
+Private key/intent, public version, and checkpoint binding commit separately in
+that order. Recovery either finds the exact matching run/HMAC or proves an
+unbound output is empty; it never creates a new version in unrelated existing
+data. Legacy identities are validated only for recovery and upgraded under
+ownership locks. The deprecated `source_identity_sha256` field is refused by
+current final gates. See [source identity privacy](../docs/SOURCE_IDENTITY_PRIVACY.md)
+for completed-artifact remediation without the original source.
+
+The HMAC identifies a path within one run. It is neither a source-content hash
+nor an attestation. Source contents must remain immutable across resume, and
+direct SQL can bypass application invariants.
 
 ## Event Tables
 
