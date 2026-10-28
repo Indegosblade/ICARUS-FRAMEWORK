@@ -2,9 +2,12 @@
 
 Generated from a multi-agent adversarial audit of the framework: **62 agents** across 7 quality dimensions (correctness, robustness, input-security, API design, testing/CI, docs/packaging), each finding independently verified by a skeptical second agent before inclusion.
 
-- **Raised:** 54  •  **Verified real:** 51  •  **Fixed:** 48 + the #93 daemon→binary edge (11 on `production-hardening`; 37 across `fix/parser-autodiscovery` #7 and `fix/audit-backlog` #8; the relationship edge on `feat/relationship-edges` #10)  •  **By design / documented:** 0  •  **Open backlog:** 2 open + #93 partially addressed
+The following counts describe the historical audit snapshot, not the current
+checkout or an empirical claim of production readiness:
 
-`fix/parser-autodiscovery` (#7) closed the registry/phantom-parser findings (#123, #183, #198, #210, #265). `fix/audit-backlog` (#8) closed the remaining differ/schema/STIX/security/resolver/docs findings. `feat/relationship-edges` (#10) landed the first real relationship edge (daemon→binary linking). Two findings remain fully deferred and #93 is now partially addressed — see "Remaining Open Backlog" at the bottom of this document.
+- **Historical raised:** 54  •  **Verified real:** 51  •  **Fixed at that snapshot:** 48 + the #93 daemon→binary edge (11 on `production-hardening`; 37 across `fix/parser-autodiscovery` #7 and `fix/audit-backlog` #8; the relationship edge on `feat/relationship-edges` #10)  •  **By design / documented:** 0  •  **Open at that snapshot:** 2 open + #93 partially addressed
+
+`fix/parser-autodiscovery` (#7) closed the registry/phantom-parser findings (#123, #183, #198, #210, #265). `fix/audit-backlog` (#8) closed the remaining differ/schema/STIX/security/resolver/docs findings. `feat/relationship-edges` (#10) landed the first real relationship edge (daemon→binary linking). At that snapshot, two findings remained fully deferred and #93 was partially addressed. See [Historical backlog and current follow-up](#historical-backlog-and-current-follow-up) for the later status, and [Ontology evolution design](ONTOLOGY_DESIGN.md) for the source-neutral design and implementation gates. A recorded design does not mean that a new ontology has shipped.
 
 Severity is the verifier's adjusted severity. `line` numbers reference the audited snapshot and may drift as the tree changes.
 

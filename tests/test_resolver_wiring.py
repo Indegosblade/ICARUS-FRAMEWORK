@@ -55,6 +55,9 @@ def _make_source_db(path: Path, run_id: str, executable_name: str, sha256: str) 
             "INSERT INTO binaries (file_id, executable_name) VALUES (?, ?)",
             (file_id, executable_name),
         )
+        # Synthetic fixtures deliberately opt into the documented raw-input
+        # posture. Resolution independently sanitizes its new output.
+        conn.execute("INSERT INTO metadata VALUES ('hygeia_skipped', 'true')")
         conn.commit()
     finally:
         conn.close()

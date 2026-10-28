@@ -5,6 +5,7 @@ Processes data sources through a configurable sequence of phases,
 saving progress at each checkpoint. Crash at phase N? Resume from phase N.
 """
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -85,6 +86,16 @@ def compute_fingerprint(
 def _canonical_fingerprint(fingerprint: dict) -> str:
     """Deterministic serialization for stable equality comparison and storage."""
     return json.dumps(fingerprint, sort_keys=True, separators=(",", ":"))
+
+
+def _source_identity_digest(source: Path, run_id: str) -> str:
+    """Bind one run to its source path without persisting that raw identity label.
+
+    This is a per-run path identity, not a source-content hash or an attestation.
+    Source contents must still remain immutable across an interrupted build.
+    """
+    value = f"{run_id}\0{Path(source).resolve()}"
+    return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 class PipelinePhase:
@@ -325,7 +336,7 @@ class Pipeline:
         conn = open_db(self.output, readonly=True)
         try:
             row = conn.execute(
-                "SELECT run_id, parser_name, source_path FROM versions WHERE id = ?",
+                "SELECT run_id, parser_name, source_path, metadata FROM versions WHERE id = ?",
                 (version_id,),
             ).fetchone()
         except sqlite3.OperationalError as error:
@@ -341,7 +352,7 @@ class Pipeline:
                 f"Checkpoint {self.checkpoint_db.name} references missing versions "
                 f"row {version_id}; pass --fresh for a clean rebuild"
             )
-        run_id, parser_name, source_path = row
+        run_id, parser_name, source_path, version_metadata = row
         expected_source = str(self.source.resolve())
         actual_source = str(Path(source_path).resolve()) if source_path else None
         mismatches = []
@@ -349,7 +360,20 @@ class Pipeline:
             mismatches.append("run_id")
         if parser_name != self.parser_name:
             mismatches.append("parser_name")
-        if actual_source != expected_source:
+        try:
+            version_details = json.loads(version_metadata or "{}")
+        except (TypeError, ValueError):
+            version_details = {}
+        identity = (
+            version_details.get("source_identity_sha256")
+            if isinstance(version_details, dict) else None
+        )
+        if identity is not None:
+            if identity != _source_identity_digest(self.source, metadata["run_id"]):
+                mismatches.append("source_identity")
+        elif actual_source != expected_source:
+            # Older checkpoints lack the digest, so retain their original
+            # exact-path validation rather than guessing at redacted labels.
             mismatches.append("source_path")
         if mismatches:
             raise CheckpointProvenanceError(
@@ -408,21 +432,29 @@ class Pipeline:
             initialize_database(self.output)
         conn = open_db(self.output)
         try:
+            from icarus.integrations.hygeia import invalidate_sanitization
             conn.execute("""
-                INSERT OR IGNORE INTO versions (run_id, parser_name, source_path, started_at)
-                VALUES (?, ?, ?, ?)
+                INSERT OR IGNORE INTO versions
+                (run_id, parser_name, source_path, started_at, metadata)
+                VALUES (?, ?, ?, ?, ?)
             """, (
                 self.context.run_id,
                 self.parser_name,
                 str(self.source.resolve()),
                 datetime.now(timezone.utc).isoformat(),
+                json.dumps({
+                    "source_identity_sha256": _source_identity_digest(
+                        self.source, self.context.run_id,
+                    ),
+                }),
             ))
             row = conn.execute(
                 "SELECT id FROM versions WHERE run_id = ?", (self.context.run_id,)
             ).fetchone()
+            invalidate_sanitization(conn)
+            conn.commit()
             if row:
                 self.context.version_id = row[0]
-            conn.commit()
         finally:
             conn.close()
 
@@ -477,6 +509,17 @@ class Pipeline:
 
         if self.context.version_id is None:
             self._create_version_record()
+        else:
+            # A validated resume (or reuse of this low-level Pipeline object)
+            # can write again. Revoke earlier content evidence before any phase
+            # or completion write, including builds that subsequently hard-exit.
+            from icarus.integrations.hygeia import invalidate_sanitization
+            conn = open_db(self.output)
+            try:
+                invalidate_sanitization(conn)
+                conn.commit()
+            finally:
+                conn.close()
         if not restored_identity:
             self._persist_version_identity()
 
@@ -532,32 +575,13 @@ class Pipeline:
         if sanitize_indices:
             from icarus.integrations.hygeia import (
                 SanitizationError,
-                _record_finalized_audit,
-                mark_sanitization_failed,
-                require_hygeia,
-                verify_clean,
+                finalize_sanitization,
             )
 
             sanitize_index = sanitize_indices[-1]
             try:
-                final_gate = verify_clean(self.output)
-            except Exception:
-                error = SanitizationError(
-                    "Final post-write sanitization gate could not complete"
-                )
-                mark_sanitization_failed(self.output)
-                self.save_checkpoint(sanitize_index, "failed", {"error": str(error)})
-                self.context.errors.append(("sanitize_final_gate", str(error)))
-                raise error from None
-
-            if not final_gate["passed"]:
-                residual_types = ", ".join(final_gate["patterns_found"].keys())
-                error = SanitizationError(
-                    "Final post-write sanitization gate found "
-                    f"{final_gate['total_findings']} residual finding(s) of type(s): "
-                    f"{residual_types}"
-                )
-                mark_sanitization_failed(self.output)
+                finalize_sanitization(self.output)
+            except SanitizationError as error:
                 self.save_checkpoint(sanitize_index, "failed", {"error": str(error)})
                 self.context.errors.append(("sanitize_final_gate", str(error)))
                 raise error
@@ -566,10 +590,6 @@ class Pipeline:
                 "passed": True,
                 "total_findings": 0,
             }
-            # A successful sanitize phase alone is deliberately not consumable:
-            # finalization above writes after it.  Only this final gate may
-            # publish the structured verified marker.
-            _record_finalized_audit(self.output, require_hygeia(), final_gate)
         self._clear_checkpoint()
 
         total = time.time() - self.context.start_time

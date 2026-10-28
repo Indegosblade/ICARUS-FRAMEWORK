@@ -243,6 +243,10 @@ def test_resume_refuses_mismatched_version_identity(
         f"UPDATE versions SET {column} = ? WHERE id = ?",  # nosec B608 - test parameter is fixed above
         (value, crashed.context.version_id),
     )
+    if column == "source_path":
+        # Legacy runs bind identity through the raw path. Current runs use a
+        # per-run path digest because the descriptive path may be sanitized.
+        conn.execute("UPDATE versions SET metadata = NULL")
     conn.commit()
     conn.close()
 

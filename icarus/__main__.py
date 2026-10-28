@@ -283,11 +283,7 @@ def cmd_parser(args):
 
 
 def cmd_resolve(args):
-    from datetime import datetime, timezone
-
-    from icarus.core.atomize import ATOM_PROJECTIONS, atomize_db
-    from icarus.core.resolver import EntityResolver
-    from icarus.core.schema import initialize_database, open_db
+    from icarus.core.resolution import resolve_sources
 
     if not 0.0 <= args.threshold <= 1.0:
         print(
@@ -297,66 +293,32 @@ def cmd_resolve(args):
         sys.exit(1)
 
     entity_types = None if args.entity_type == "all" else [args.entity_type]
-
     out_path = Path(args.out)
-    initialize_database(out_path)
-    out_conn = open_db(out_path)
-    try:
-        total = 0
-        for i, src in enumerate(args.sources):
-            src_path = Path(src)
-            if not src_path.exists():
-                print(f"ERROR: Source database does not exist: {src_path}", file=sys.stderr)
-                sys.exit(1)
-            src_conn = open_db(src_path, readonly=True, immutable=True)
-            try:
-                now = datetime.now(timezone.utc).isoformat()
-                run_id = f"resolve-{i}-{src_path.name}"
-                cursor = out_conn.execute(
-                    "INSERT INTO versions (run_id, parser_name, source_path, started_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (run_id, "resolve", str(src), now),
-                )
-                out_conn.commit()
-                version_id = cursor.lastrowid
-                assert version_id is not None
-                counts = atomize_db(src_conn, out_conn, version_id, entity_types)
-            finally:
-                src_conn.close()
-            src_total = sum(counts.values())
-            total += src_total
-            detail = ", ".join(f"{k}={v}" for k, v in counts.items())
-            print(f"[{i + 1}/{len(args.sources)}] {src_path.name}: {src_total} atoms ({detail})")
-        print(f"Total atoms: {total} across {len(args.sources)} source(s) -> {out_path}")
-    finally:
-        out_conn.close()
-
-    if args.atomize_only:
-        return
-
-    # The atomize connection above is fully closed before EntityResolver opens
-    # its own working connection to the same file — never two write handles
-    # open on out_path at once.
-    resolved_types = list(ATOM_PROJECTIONS) if args.entity_type == "all" else [args.entity_type]
-
-    with EntityResolver(str(out_path), experimental=True) as r:
-        for et in resolved_types:
-            result = r.resolve_scored(et, threshold=args.threshold)
-            print(
-                f"[resolve] {et}: clusters={result['clusters']} "
-                f"merges={result['merges']} atoms_resolved={result['atoms_resolved']}"
-            )
-
-        canonical_count = r.conn.execute(
-            "SELECT COUNT(DISTINCT bag_id) FROM bag_atoms"
-        ).fetchone()[0]
-        cross_source_count = r.conn.execute(
-            "SELECT COUNT(*) FROM ("
-            "SELECT bag_id FROM bag_atoms ba JOIN atoms a ON a.id = ba.atom_id "
-            "GROUP BY bag_id HAVING COUNT(DISTINCT a.source_version_id) >= 2)"
-        ).fetchone()[0]
-
-    print(f"Canonical entities: {canonical_count} ({cross_source_count} spanning >= 2 sources)")
+    summary = resolve_sources(
+        [Path(source) for source in args.sources], out_path,
+        entity_types=entity_types, threshold=args.threshold, atomize_only=args.atomize_only,
+        allow_unverified=getattr(args, "allow_unverified", False),
+    )
+    for index, source in enumerate(summary["sources"], start=1):
+        detail = ", ".join(f"{key}={value}" for key, value in source["counts"].items())
+        print(
+            f"[{index}/{len(args.sources)}] {source['name']}: "
+            f"{source['atoms']} atoms ({detail})"
+        )
+    print(
+        f"Total atoms: {summary['total_atoms']} across {len(args.sources)} "
+        f"source(s) -> {out_path}"
+    )
+    for entity_type, result in summary["resolutions"].items():
+        print(
+            f"[resolve] {entity_type}: clusters={result['clusters']} "
+            f"merges={result['merges']} atoms_resolved={result['atoms_resolved']}"
+        )
+    if not args.atomize_only:
+        print(
+            f"Canonical entities: {summary['canonical_entities']} "
+            f"({summary['cross_source_entities']} spanning >= 2 sources)"
+        )
 
 
 def cmd_gui(args):
@@ -464,6 +426,9 @@ def main():
     resolve_p.add_argument(
         "--atomize-only", action="store_true",
         help="Stop after atomizing sources; skip scored resolution")
+    resolve_p.add_argument(
+        "--allow-unverified", action="store_true",
+        help="Recover failed or unmarked inputs; new output sanitization is still mandatory")
     resolve_p.add_argument(
         "sources", nargs="+", help="One or more source ICARUS database paths")
 

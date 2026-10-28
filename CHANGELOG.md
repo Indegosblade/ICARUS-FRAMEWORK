@@ -23,6 +23,15 @@ Public-release readiness remediation toward the first public beta (`4.0.0b1`).
 - `query --allow-unverified` to inspect a database whose sanitization failed (#77).
 
 ### Changed
+- Cross-source resolution publishes a new database only after sanitization and its
+  final verification gate succeed. Inputs must be distinct, checkpointed snapshots;
+  existing outputs are refused. `--allow-unverified` permits input recovery while
+  keeping output sanitization mandatory (#108).
+- Atomization and resolver mutations revoke old sanitization evidence in the same
+  transaction as their writes, including committed partial-failure results (#108).
+- Pin HYGEIA to the reviewed 3.15.0 commit with error propagation and verified
+  external-content FTS5 rebuilding. Development coverage and distribution-build
+  tooling use the same validated versions locally and in the workflow.
 - Maturity classifier corrected from `Production/Stable` to `Beta`; README states the
   Beta, source-available (non-OSI) posture explicitly.
 - HYGEIA is now the canonical sanitizer and **fails closed** if it cannot load; findings

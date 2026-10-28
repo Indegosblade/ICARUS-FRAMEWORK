@@ -172,18 +172,33 @@ current working directory.
 EXPERIMENTAL. Atomize one or more source databases and resolve entities across them — cross-source canonical identity. Each source is projected into immutable `atoms` (tagged with a new `versions` row in the output database); unless `--atomize-only` is given, `EntityResolver.resolve_scored()` then runs **block -> score -> cluster -> merge** over the atoms of each requested entity type and writes canonical `bags`.
 
 ```bash
-icarus resolve --out PATH [--entity-type TYPE] [--threshold FLOAT] [--atomize-only] SOURCE [SOURCE ...]
+icarus resolve --out PATH [--entity-type TYPE] [--threshold FLOAT] [--atomize-only] [--allow-unverified] SOURCE [SOURCE ...]
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--out, -o` | Output resolution database path (required) |
-| `--entity-type` | Entity type to atomize and resolve: `binaries`, `daemons`, or `all` (default: `all`) |
+| `--out, -o` | New output resolution database path (required); existing output is refused |
+| `--entity-type` | Entity type to atomize and resolve: `binaries`, `daemons`, `frameworks`, `kexts`, `files`, or `all` (default: `all`) |
 | `--threshold` | Score cutoff in `[0, 1]` for a candidate pair to count as a match edge (default: `0.85`) |
 | `--atomize-only` | Stop after atomizing; skip scored resolution (no `bags`/`match_candidates` rows written) |
+| `--allow-unverified` | Recover failed or unmarked inputs. The new output still requires real HYGEIA sanitization and final verification. |
 | `sources` | One or more source ICARUS database paths (positional, at least one required) |
 
 Every scored candidate pair is persisted to `match_candidates` — including pairs that score *below* threshold — so a merge decision is always auditable, not just the ones that happened. Each merged `bags` row's `score` column is the mean of its in-cluster match scores. See [Schema Reference](Schema-Reference.md#match_candidates) for both tables.
+
+Sources must be distinct, frozen, checkpointed database snapshots. A nonempty
+source WAL is refused even with `--allow-unverified`, because immutable SQLite
+reads would omit its latest committed rows. Source databases remain unchanged.
+Default admission accepts verified databases or an explicit `--skip-hygeia`
+build; failed and unmarked inputs require the recovery flag.
+
+Resolution holds an output lease, builds into a sibling temporary file, finalizes
+each source's version record, then independently sanitizes and verifies the new
+database before publishing it. Input trust markers are never copied as output
+evidence. This also applies to `--atomize-only`. A missing/corrupt later source,
+failed resolution, or failed sanitization publishes no partial output. Existing
+outputs and source/output aliases are refused; choose a new output path for a
+new resolution run.
 
 **Example — resolve across two dumps:**
 

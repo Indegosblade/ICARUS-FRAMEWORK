@@ -21,7 +21,7 @@ try:
     try:
         from hygeia.verifier import is_false_positive as _hygeia_is_false_positive
     except ImportError:
-        # Compatibility with the currently pinned HYGEIA 3.14 API. Newer
+        # Compatibility with older HYGEIA 3.14 installations. Newer
         # HYGEIA releases expose this policy helper as a supported public API.
         from hygeia.verifier import _is_false_positive as _hygeia_is_false_positive
 
@@ -655,6 +655,34 @@ def verify_clean(db_path: Path) -> Dict[str, Any]:
     require_hygeia()
     registry = _build_registry()
     return _scan_database(Path(db_path), registry, secrets.token_bytes(32))
+
+
+def finalize_sanitization(db_path: Path) -> Dict[str, Any]:
+    """Verify all final writes and publish fresh content-coupled trust evidence.
+
+    Both pipeline builds and cross-source resolution call this only after their
+    final data/provenance writes and a successful real sanitize_output pass.
+    """
+    try:
+        gate = verify_clean(db_path)
+    except Exception:
+        mark_sanitization_failed(db_path)
+        raise SanitizationError(
+            "Final post-write sanitization gate could not complete"
+        ) from None
+    if not gate["passed"]:
+        mark_sanitization_failed(db_path)
+        residual_types = ", ".join(gate["patterns_found"].keys())
+        raise SanitizationError(
+            "Final post-write sanitization gate found "
+            f"{gate['total_findings']} residual finding(s) of type(s): {residual_types}"
+        )
+    try:
+        _record_finalized_audit(db_path, require_hygeia(), gate)
+    except Exception:
+        mark_sanitization_failed(db_path)
+        raise SanitizationError("Could not publish finalized sanitization evidence") from None
+    return gate
 
 
 def using_standalone_hygeia() -> bool:
