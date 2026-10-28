@@ -59,7 +59,7 @@ icarus diff v1.db v2.db -o report.md
 
 | Dependency | Version | Purpose |
 |-----------|---------|---------|
-| Python | >= 3.10 | Runtime. Tested on 3.10, 3.12, 3.13. |
+| Python | >= 3.10 | Runtime. Tested on 3.10–3.13. |
 | SQLite | >= 3.35 | FTS5 full-text search support. Ships with Python on all platforms. |
 | [HYGEIA](https://github.com/Indegosblade/HYGEIA) | v3.15.0 | PII detection and sanitization. Auto-installed from a pinned commit. |
 | [PyYAML](https://pyyaml.org/) | >= 6.0 | Parser manifest loading. |
@@ -110,6 +110,9 @@ icarus query intel.db --search "nginx"
 
 # Query — table stats
 icarus query intel.db --stats
+
+# GUI — browse an existing database and its recorded relationships
+icarus gui intel.db
 
 # Query — raw SQL
 icarus query intel.db --sql "SELECT path, size FROM files WHERE size > 100000000 ORDER BY size DESC LIMIT 20"
@@ -326,13 +329,15 @@ See [about/ARCHITECTURE.md](about/ARCHITECTURE.md) for design decisions and exte
 pytest tests/ -x -q
 ```
 
-325 tests across 31 modules covering schema, queries, diffing, pipeline, entity resolution (the atomizer, similarity scoring/blocking, scored resolution, and CLI/pipeline wiring), observations, parsers, manifests, registry, test harness, generic fallbacks, CloudTrail, the macOS/iOS daemon parser, STIX export, HYGEIA sanitization (column-scoped redaction and the fail-closed post-gate), the read-only query barrier, hostile-input safety, provenance, and the top-level public API.
+The regression suite covers schema, queries, diffing, pipeline, entity resolution (the atomizer, similarity scoring/blocking, scored resolution, and CLI/pipeline wiring), observations, parsers, manifests, registry, test harness, generic fallbacks, CloudTrail, the macOS/iOS daemon parser, STIX export, HYGEIA sanitization (column-scoped redaction and the fail-closed post-gate), the read-only query barrier and local explorer, hostile-input safety, provenance, and the top-level public API.
 
-CI runs the full test matrix on every push:
+CI gates a 3 OS × 4 Python-version matrix on lint, security, and dependency checks
+for pushes to `main` and pull requests targeting `main`:
 
 | | ubuntu | windows | macos |
 |---|:---:|:---:|:---:|
 | **Python 3.10** | x | x | x |
+| **Python 3.11** | x | x | x |
 | **Python 3.12** | x | x | x |
 | **Python 3.13** | x | x | x |
 
@@ -426,7 +431,7 @@ icarus-framework/
 ├── schema/                       Standalone SQL reference
 ├── about/                        Architecture and parser docs
 ├── wiki/                         GitHub wiki source
-├── .github/workflows/ci.yml      CI: 9-job matrix + lint + security
+├── .github/workflows/ci.yml      CI: 3 OS x 4 Python versions + quality gates
 ├── pyproject.toml
 └── LICENSE
 ```
@@ -447,6 +452,8 @@ icarus-framework/
 | [wiki/STIX-Export.md](wiki/STIX-Export.md) | STIX 2.1 mapping, custom extensions, bundle format |
 | [wiki/Validation-Results.md](wiki/Validation-Results.md) | Test run data from real pipeline executions |
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Trust boundaries, assumptions, and what sanitization does and does not guarantee |
+| [docs/ONTOLOGY_EXPLORER.md](docs/ONTOLOGY_EXPLORER.md) | Local read-only ontology explorer and session controls |
+| [docs/ONTOLOGY_DESIGN.md](docs/ONTOLOGY_DESIGN.md) | Proposed future source-neutral ontology and implementation gates; not shipped |
 | [SECURITY.md](SECURITY.md) | Supported versions and how to report a vulnerability |
 | [docs/PRODUCTION_AUDIT.md](docs/PRODUCTION_AUDIT.md) | Multi-agent production-readiness audit — findings, fixes, backlog |
 
