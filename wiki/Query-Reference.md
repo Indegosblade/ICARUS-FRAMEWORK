@@ -86,6 +86,12 @@ The CLI requires exactly one query mode (`--sql`, `--search`, or `--stats`).
 Raw SQL runs on a read-only connection that rejects writes, `ATTACH`, and
 `DETACH`. Use `icarus exec` for deliberate database mutations.
 
+Python callers may explicitly construct `IcarusQuery(path, writable=True)` and
+use `execute()` followed by `commit()`. Guarded DML and DDL revoke old sanitizer
+evidence in that same transaction; `rollback()` or closing without committing
+discards both. Direct raw connection/cursor writes bypass this guarantee.
+See [public write and transaction boundaries](../docs/PUBLIC_WRITES.md).
+
 ```bash
 icarus query intel.db --sql "SELECT filename, size FROM files WHERE size > 100000000 ORDER BY size DESC LIMIT 10"
 ```

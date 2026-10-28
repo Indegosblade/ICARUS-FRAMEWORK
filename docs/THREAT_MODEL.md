@@ -32,6 +32,11 @@
 
 ## Sanitization-marker limits
 
+Supported writable-query statements and initializer metadata updates revoke old
+evidence transactionally. Raw `IcarusQuery.conn`/cursor/executescript writes and
+independent SQLite connections are outside that guarded contract; see
+[PUBLIC_WRITES.md](PUBLIC_WRITES.md). Revocation does not sanitize new content.
+
 The HYGEIA status and audit records are mutable SQLite metadata, not a
 cryptographic attestation. ICARUS validates their exact current schema and
 invalidates them on its supported write path, which catches stale, malformed,

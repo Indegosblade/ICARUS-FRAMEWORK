@@ -585,6 +585,11 @@ def invalidate_sanitization(conn: sqlite3.Connection) -> None:
         f"DELETE FROM metadata WHERE key IN ({placeholders})",  # nosec B608 - placeholders are generated from a fixed tuple
         _TRUST_METADATA_KEYS,
     )
+    if conn.execute(
+        f"SELECT 1 FROM metadata WHERE key IN ({placeholders}) LIMIT 1",  # nosec B608
+        _TRUST_METADATA_KEYS,
+    ).fetchone() is not None:
+        raise sqlite3.IntegrityError("Sanitization trust metadata could not be revoked")
 
 
 def mark_sanitization_failed(db_path: Path) -> None:

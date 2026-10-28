@@ -1001,8 +1001,17 @@ def initialize_database(db_path: Path, metadata: Optional[dict] = None) -> dict:
     Creates a fresh v6 database, or migrates an existing v2/v3/v4/v5 database
     forward. Databases outside that supported range are refused before their
     stored version is changed. Returns stats dict with table count and schema
-    version.
+    version. Ordinary metadata changes revoke sanitizer evidence in the same
+    transaction; identical metadata is a no-op. Framework schema/trust keys
+    cannot be supplied through this caller metadata mapping.
     """
+    metadata_values = {str(key): str(value) for key, value in (metadata or {}).items()}
+    if metadata_values:
+        from icarus.integrations.hygeia import _TRUST_METADATA_KEYS
+        reserved = sorted(set(metadata_values) & {"schema_version", *_TRUST_METADATA_KEYS})
+        if reserved:
+            raise ValueError(f"Framework-owned metadata cannot be supplied: {', '.join(reserved)}")
+
     conn = open_db(db_path)
     try:
         existing_version = _read_schema_version(conn)
@@ -1055,11 +1064,29 @@ def initialize_database(db_path: Path, metadata: Optional[dict] = None) -> dict:
         # has. Guarded and idempotent — a no-op on a correct fresh v6 DB.
         _repair_migrated_entity_fks(conn)
 
-        if metadata:
-            for k, v in metadata.items():
-                conn.execute(
-                    "INSERT OR REPLACE INTO metadata VALUES (?, ?)", (k, str(v))
-                )
+        if metadata_values:
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
+            changes = []
+            for key, value in metadata_values.items():
+                old = conn.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
+                if old is None or old[0] != value:
+                    changes.append((key, value))
+            if changes:
+                from icarus.integrations.hygeia import invalidate_sanitization
+                conn.execute("SAVEPOINT icarus_initializer_metadata")
+                try:
+                    invalidate_sanitization(conn)
+                    conn.executemany("INSERT OR REPLACE INTO metadata VALUES (?, ?)", changes)
+                    # Also reject a trigger that restores copied framework
+                    # evidence while applying otherwise ordinary metadata.
+                    invalidate_sanitization(conn)
+                    conn.execute("RELEASE SAVEPOINT icarus_initializer_metadata")
+                except BaseException:
+                    if conn.in_transaction:
+                        conn.execute("ROLLBACK TO SAVEPOINT icarus_initializer_metadata")
+                        conn.execute("RELEASE SAVEPOINT icarus_initializer_metadata")
+                    raise
 
         conn.commit()
 
